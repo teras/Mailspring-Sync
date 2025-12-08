@@ -3,8 +3,8 @@ project (mailsync)
 
 SET (CMAKE_CXX_FLAGS   "-Wno-unknown-pragmas")
 
-#Set Linker flags
-set(CMAKE_EXE_LINKER_FLAGS "-static-libgcc -static-libstdc++")
+#Set Linker flags (removed static linking for compatibility with shared libs)
+set(CMAKE_EXE_LINKER_FLAGS "")
 
 
 find_package (PkgConfig REQUIRED)
@@ -52,39 +52,39 @@ IF(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
 
   add_definitions(-DSQLITE_ENABLE_FTS5=1 -DHAVE_USLEEP=1 -DSQLITE_OMIT_LOAD_EXTENSION=1)
 
-  target_link_libraries(mailsync libMailCore.a)
+  target_link_libraries(mailsync ${CMAKE_SOURCE_DIR}/Vendor/mailcore2/build/src/libMailCore.a)
   target_link_libraries(mailsync ${GLIB_LIBRARIES})
-  target_link_libraries(mailsync libetpan.a)
+  target_link_libraries(mailsync ${CMAKE_SOURCE_DIR}/Vendor/libetpan/src/.libs/libetpan.a)
 
-  find_library(XML_LIB NAMES libxml2.a libxml2)
+  find_library(XML_LIB NAMES xml2 libxml2)
   target_link_libraries(mailsync ${XML_LIB})
   target_include_directories(mailsync PRIVATE /usr/include/libxml2)
 
-  find_library(LZMA_LIB NAMES liblzma.a liblzma)
+  find_library(LZMA_LIB NAMES lzma liblzma)
   target_link_libraries(mailsync ${LZMA_LIB})
 
-  find_library(Z_LIB NAMES libz.a libz)
+  find_library(Z_LIB NAMES z libz)
   target_link_libraries(mailsync ${Z_LIB})
 
-  find_library(RESOLV_LIB NAMES libresolv.a libresolv)
+  find_library(RESOLV_LIB NAMES resolv libresolv)
   target_link_libraries(mailsync ${RESOLV_LIB})
 
-  find_library(CTEMPLATE_LIB NAMES libctemplate.a libctemplate)
+  find_library(CTEMPLATE_LIB NAMES ctemplate libctemplate)
   target_link_libraries(mailsync ${CTEMPLATE_LIB})
 
-  find_library(UUID_LIB NAMES libuuid.a libuuid)
+  find_library(UUID_LIB NAMES uuid libuuid)
   target_link_libraries(mailsync ${UUID_LIB})
 
-  find_library(ICUI18N_LIB NAMES libicui18n.a libicui18n)
+  find_library(ICUI18N_LIB NAMES icui18n libicui18n)
   target_link_libraries(mailsync ${ICUI18N_LIB})
 
-  find_library(ICUUC_LIB NAMES libicuuc.a libicuuc)
+  find_library(ICUUC_LIB NAMES icuuc libicuuc)
   target_link_libraries(mailsync ${ICUUC_LIB})
 
-  find_library(ICUDATA_LIB NAMES libicudata.a libicudata)
+  find_library(ICUDATA_LIB NAMES icudata libicudata)
   target_link_libraries(mailsync ${ICUDATA_LIB})
 
-  find_library(C_ARES_LIB NAMES libcares.a libcares)
+  find_library(C_ARES_LIB NAMES cares libcares)
   target_link_libraries(mailsync ${C_ARES_LIB})
 
   #find_library(SASL2_LIB NAMES libsasl2.a libsasl2)
