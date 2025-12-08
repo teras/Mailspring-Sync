@@ -41,49 +41,9 @@ MetadataWorker::MetadataWorker(shared_ptr<Account> account) :
 }
 
 void MetadataWorker::run() {
-    deltasCursor = store->getKeyValue("cursor-" + account->id());
-    backoffStep = 0;
-
-    if (Identity::GetGlobal() == nullptr) {
-        logger->info("Metadata sync disabled, not logged in.");
-        return;
-    }
-
-    while(true) {
-        try {
-            // If we don't have a cursor (we're just starting for the first time),
-            // obtain a cursor for "now" and paginate through all existing metadata.
-            // By the time we finish, now will be out of date but inclusive of all
-            // changes since we started.
-            if (deltasCursor == "") {
-                fetchDeltaCursor();
-                
-                int page = 0;
-                bool more = true;
-                while (more == true) {
-                    more = fetchMetadata(page++);
-                }
-            }
-
-            // Open the streaming connection and block until the connection is broken
-            fetchDeltasBlocking();
-            backoffStep = 0;
-
-        } catch (SyncException & ex) {
-            if (!ex.isRetryable()) {
-                exceptions::logCurrentExceptionWithStackTrace();
-                abort();
-            }
-            logger->info("Will retry in {} sec.", backoffSeconds[backoffStep]);
-            MailUtils::sleepWorkerUntilWakeOrSec(backoffSeconds[backoffStep]);
-            if (backoffStep < 9)
-                backoffStep += 1;
-        } catch (...) {
-            exceptions::logCurrentExceptionWithStackTrace();
-            abort();
-        }
-    }
-    
+    // DISABLED: Remote metadata sync removed for local-only client
+    logger->info("Metadata sync disabled - local-only client.");
+    return;
 }
 
 bool MetadataWorker::fetchMetadata(int page) {

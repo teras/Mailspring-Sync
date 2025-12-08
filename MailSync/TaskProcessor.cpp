@@ -1220,27 +1220,9 @@ void TaskProcessor::performLocalSyncbackMetadata(Task * task) {
 
 
 void TaskProcessor::performRemoteSyncbackMetadata(Task * task) {
-    if (Identity::GetGlobal() == nullptr) {
-        logger->info("Skipped metadata sync, not logged in.");
-        return;
-    }
-    
-    json & data = task->data();
-    string id = data["modelId"];
-    string pluginId = data["pluginId"];
-
-    json payload = {
-        {"objectType", data["modelClassName"]},
-        {"version", data["modelMetadataNewVersion"]},
-        {"value", data["value"]},
-    };
-
-    if (data["modelHeaderMessageId"].is_string()) {
-        payload["headerMessageId"] = data["modelHeaderMessageId"].get<string>();
-    }
-
-    const json results = PerformIdentityRequest("/metadata/" + account->id() + "/" + id + "/" + pluginId, "POST", payload);
-    logger->info("Syncback of metadata {}:{} = {} succeeded.", id, pluginId, payload.dump());
+    // DISABLED: Remote metadata syncback removed for local-only client
+    logger->info("Skipped metadata sync - local-only client.");
+    return;
 }
 
 void TaskProcessor::performRemoteDestroyCategory(Task * task) {
@@ -1611,18 +1593,9 @@ void TaskProcessor::performRemoteSendDraft(Task * task) {
 }
 
 void TaskProcessor::performRemoteSendFeatureUsageEvent(Task * task) {
-    if (Identity::GetGlobal() == nullptr) {
-        logger->info("Skipped metadata sync, not logged in.");
-        return;
-    }
-    const auto feature = task->data()["feature"].get<string>();
-    json payload = {
-        {"feature", feature}
-    };
-
-    logger->info("Incrementing usage of feature: {}", feature);
-    auto result = PerformIdentityRequest("/api/feature_usage_event", "POST", payload);
-    logger->info("Incrementing usage of feature succeeded: {}", result.dump());
+    // DISABLED: Feature usage tracking removed for local-only client
+    logger->info("Skipped feature usage tracking - local-only client.");
+    return;
 }
 
 void TaskProcessor::performLocalChangeRoleMapping(Task * task) {
