@@ -17,6 +17,13 @@ using namespace std;
 DavXML::DavXML(string xml, string url):
     xpathContext(nullptr)
 {
+    // HTTP Protocol Quirk: Content-Type Header Mismatches
+    // Many CalDAV servers (notably iCloud and Open-Xchange) return valid XML but with
+    // incorrect Content-Type headers like "text/plain" instead of "text/xml" or
+    // "application/xml". The Python caldav library handles this by parsing XML regardless
+    // of Content-Type, and we do the same - we simply attempt to parse whatever the server
+    // returns without checking Content-Type first. This pragmatic approach ensures
+    // compatibility with non-compliant servers.
     doc = xmlReadMemory(xml.c_str(), (int)xml.size(), url.c_str(), "utf-8", 0);
     if (doc == nullptr) {
         throw new SyncException("Unable to parse CalDav XML", xml, false);
@@ -83,7 +90,11 @@ void DavXML::evaluateXPath(string expr, std::function<void(xmlNodePtr)> yieldBlo
 string DavXML::nodeContentAtXPath(string expr, xmlNodePtr withinNode) {
     string result = "";
     evaluateXPath(expr, ([&](xmlNodePtr cur) {
-        result = string((char *)cur->content);
+        // Handle null content gracefully - can occur when querying for element nodes
+        // (which have child nodes, not direct text content) rather than text() nodes
+        if (cur->content != nullptr) {
+            result = string((char *)cur->content);
+        }
         return;
     }), withinNode);
     return result;

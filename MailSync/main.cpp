@@ -9,6 +9,7 @@
 //  in 'LICENSE.md', which is part of the Mailspring-Sync package.
 //
 
+#include <atomic>
 #include <iostream>
 #include <string>
 #include <time.h>
@@ -40,9 +41,14 @@
 #include "SyncException.hpp"
 #include "Task.hpp"
 #include "TaskProcessor.hpp"
+#include "NetworkRequestUtils.hpp"
 #include "ThreadUtils.h"
 #include "constants.h"
 #include "SPDLogExtensions.hpp"
+
+#if defined(__linux__)
+#include "MailspringDynamicTidy.h"
+#endif
 
 using namespace nlohmann;
 using option::Option;
@@ -59,7 +65,7 @@ shared_ptr<GoogleContactsWorker> contactsWorker = nullptr;
 shared_ptr<MetadataWorker> metadataWorker = nullptr;
 shared_ptr<MetadataExpirationWorker> metadataExpirationWorker = nullptr;
 
-bool bgWorkerShouldMarkAll = true;
+std::atomic<bool> bgWorkerShouldMarkAll{true};
 
 std::thread * fgThread = nullptr;
 std::thread * bgThread = nullptr;
@@ -129,7 +135,7 @@ const option::Descriptor usage[] =
     {HELP,    0,"" , "help",    CArg::None,      "  --help  \tPrint usage and exit." },
     {IDENTITY,0,"a", "identity",CArg::Optional,  USAGE_IDENTITY },
     {ACCOUNT, 0,"a", "account", CArg::Optional,  "  --account, -a  \tRequired: Account JSON with credentials." },
-    {MODE,    0,"m", "mode",    CArg::Required,  "  --mode, -m  \tRequired: sync, test, reset, calendar, or migrate." },
+    {MODE,    0,"m", "mode",    CArg::Required,  "  --mode, -m  \tRequired: sync, test, reset, calendar, migrate, or install-check." },
     {ORPHAN,  0,"o", "orphan",  CArg::None,      "  --orphan, -o  \tOptional: allow the process to run without a parent bound to stdin." },
     {VERBOSE, 0,"v", "verbose", CArg::None,      "  --verbose, -v  \tOptional: log all IMAP and SMTP traffic for debugging purposes." },
     {0,0,0,0,0,0}
@@ -385,6 +391,172 @@ int runSingleFunctionAndExit(std::function<void()> fn) {
     return code;
 }
 
+int runInstallCheck() {
+    AutoreleasePool pool;
+    json resp = {
+        {"error", nullptr},
+        {"http_check", nullptr},
+        {"imap_check", nullptr},
+        {"smtp_check", nullptr},
+        {"tidy_check", nullptr}
+    };
+
+    // Step 1: Check HTTP connectivity to identity server using curl
+    string httpError = "";
+    long httpCode = 0;
+    try {
+        string identityServer = MailUtils::getEnvUTF8("IDENTITY_SERVER");
+        string pingUrl = identityServer + "/ping";
+        CURL * curl_handle = CreateJSONRequest(pingUrl, "GET");
+
+        string result;
+        curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, _onAppendToString);
+        curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&result);
+
+        CURLcode res = curl_easy_perform(curl_handle);
+        if (res != CURLE_OK) {
+            httpError = string("curl error: ") + curl_easy_strerror(res);
+        } else {
+            curl_easy_getinfo(curl_handle, CURLINFO_RESPONSE_CODE, &httpCode);
+            // Any HTTP response code means curl and SSL worked
+        }
+        // Use shared cleanup which also frees the header list
+        CleanupCurlRequest(curl_handle);
+    } catch (std::exception & ex) {
+        httpError = ex.what();
+    }
+
+    if (httpError != "") {
+        resp["http_check"] = {{"error", httpError}};
+    } else {
+        resp["http_check"] = {{"status_code", httpCode}};
+    }
+
+    // Step 2: Check IMAP connectivity to Gmail to verify SSL libraries work
+    string imapError = "";
+    try {
+        IMAPSession session;
+        session.setHostname(MCSTR("imap.gmail.com"));
+        session.setPort(993);
+        session.setConnectionType(ConnectionType::ConnectionTypeTLS);
+        // No username/password - we just want to verify SSL connection works
+
+        ErrorCode err = ErrorNone;
+        session.connect(&err);
+
+        // Connection succeeded or failed with auth error (both mean SSL works)
+        if (err != ErrorNone && err != ErrorAuthentication && err != ErrorAuthenticationRequired) {
+            imapError = ErrorCodeToTypeMap.count(err) ? ErrorCodeToTypeMap[err] : ("IMAP error code: " + to_string(err));
+        }
+        // If we get here with ErrorAuthentication or ErrorAuthenticationRequired, SSL worked
+        session.disconnect();
+    } catch (std::exception & ex) {
+        imapError = ex.what();
+    }
+
+    if (imapError != "") {
+        resp["imap_check"] = {{"error", imapError}};
+    } else {
+        resp["imap_check"] = {{"success", true}};
+    }
+
+    // Step 3: Check SMTP connectivity to Gmail to verify SSL libraries work for SMTP
+    string smtpError = "";
+    try {
+        SMTPSession smtp;
+        smtp.setHostname(MCSTR("smtp.gmail.com"));
+        smtp.setPort(465);
+        smtp.setConnectionType(ConnectionType::ConnectionTypeTLS);
+        // No username/password - we just want to verify SSL connection works
+
+        ErrorCode err = ErrorNone;
+        smtp.connect(&err);
+
+        // Connection succeeded or failed with auth error (both mean SSL works)
+        if (err != ErrorNone && err != ErrorAuthentication && err != ErrorAuthenticationRequired) {
+            smtpError = ErrorCodeToTypeMap.count(err) ? ErrorCodeToTypeMap[err] : ("SMTP error code: " + to_string(err));
+        }
+        // If we get here with ErrorAuthentication or ErrorAuthenticationRequired, SSL worked
+        smtp.disconnect();
+    } catch (std::exception & ex) {
+        smtpError = ex.what();
+    }
+
+    if (smtpError != "") {
+        resp["smtp_check"] = {{"error", smtpError}};
+    } else {
+        resp["smtp_check"] = {{"success", true}};
+    }
+
+    // Step 4: Check libtidy by actually processing HTML (Linux only)
+    string tidyError = "";
+#if defined(__linux__)
+    if (!mailspring_tidy_available()) {
+        const char* err = mailspring_tidy_error();
+        tidyError = err ? err : "libtidy not available";
+    } else {
+        // Actually test tidy by processing sample HTML, same as MCHTMLCleaner::cleanHTML
+        MSTidyBuffer output = {0};
+        MSTidyBuffer errbuf = {0};
+        MSTidyBuffer docbuf = {0};
+
+        MSTidyDoc tdoc = mailspring_tidyCreate();
+        if (tdoc == NULL) {
+            tidyError = "tidyCreate returned NULL";
+        } else {
+            mailspring_tidyBufInit(&output);
+            mailspring_tidyBufInit(&errbuf);
+            mailspring_tidyBufInit(&docbuf);
+
+            // Test with simple HTML
+            const char* testHTML = "<html><body><p>Test</p></body></html>";
+            mailspring_tidyBufAppend(&docbuf, (void*)testHTML, strlen(testHTML));
+
+            // Use dynamically resolved option IDs for libtidy version compatibility
+            mailspring_tidyOptSetBool(tdoc, mailspring_tidyOptId_XhtmlOut(), MSTidyYes);
+            mailspring_tidyOptSetInt(tdoc, mailspring_tidyOptId_DoctypeMode(), MSTidyDoctypeUser);
+            mailspring_tidyOptSetBool(tdoc, mailspring_tidyOptId_Mark(), MSTidyNo);
+            mailspring_tidySetCharEncoding(tdoc, "utf8");
+            mailspring_tidyOptSetBool(tdoc, mailspring_tidyOptId_ForceOutput(), MSTidyYes);
+            mailspring_tidyOptSetBool(tdoc, mailspring_tidyOptId_ShowWarnings(), MSTidyNo);
+            mailspring_tidyOptSetInt(tdoc, mailspring_tidyOptId_ShowErrors(), 0);
+            mailspring_tidySetErrorBuffer(tdoc, &errbuf);
+
+            int parseResult = mailspring_tidyParseBuffer(tdoc, &docbuf);
+            int cleanResult = mailspring_tidyCleanAndRepair(tdoc);
+            int saveResult = mailspring_tidySaveBuffer(tdoc, &output);
+
+            if (parseResult < 0 || cleanResult < 0 || saveResult < 0) {
+                tidyError = "tidy processing failed (parse=" + to_string(parseResult) +
+                           ", clean=" + to_string(cleanResult) +
+                           ", save=" + to_string(saveResult) + ")";
+            } else if (output.bp == NULL) {
+                tidyError = "tidy produced no output";
+            }
+
+            mailspring_tidyBufFree(&docbuf);
+            mailspring_tidyBufFree(&output);
+            mailspring_tidyBufFree(&errbuf);
+            mailspring_tidyRelease(tdoc);
+        }
+    }
+#endif
+
+    if (tidyError != "") {
+        resp["tidy_check"] = {{"error", tidyError}};
+    } else {
+        resp["tidy_check"] = {{"success", true}};
+    }
+
+    // Determine overall success
+    bool success = (httpError == "" && imapError == "" && smtpError == "" && tidyError == "");
+    if (!success) {
+        resp["error"] = "One or more checks failed";
+    }
+
+    cout << resp.dump();
+    return success ? 0 : 1;
+}
 
 void runListenOnMainThread(shared_ptr<Account> account) {
     MailStore store;
@@ -438,7 +610,8 @@ void runListenOnMainThread(shared_ptr<Account> account) {
                 // syncback. This also mitigates any potential remote loads+saves that aren't inside transactions
                 // and could overwrite local changes.
                 static atomic<bool> queuedForegroundWake { false };
-                if (!queuedForegroundWake) {
+                bool expected = false;
+                if (queuedForegroundWake.compare_exchange_strong(expected, true)) {
                     std::thread([]() {
                         std::this_thread::sleep_for(chrono::milliseconds(300));
                         if (fgWorker) {
@@ -446,7 +619,6 @@ void runListenOnMainThread(shared_ptr<Account> account) {
                         }
                         queuedForegroundWake = false;
                     }).detach();
-                    queuedForegroundWake = true;
                 }
             }
             
@@ -484,14 +656,14 @@ void runListenOnMainThread(shared_ptr<Account> account) {
 
             if (type == "sync-calendar") {
                 static atomic<bool> runningCalendarSync { false };
-                if (!runningCalendarSync) {
-                    std::thread([&]() {
+                bool expected = false;
+                if (runningCalendarSync.compare_exchange_strong(expected, true)) {
+                    std::thread([account]() {
                         SetThreadName("calendar");
                         auto worker = DAVWorker(account);
                         worker.run();
                         runningCalendarSync = false;
                     }).detach();
-                    runningCalendarSync = true;
                 }
             }
 
@@ -542,7 +714,7 @@ string exectuablePath = argv[0];
     
     if (options[HELP] || argc == 0) {
         option::printUsage(std::cout, usage);
-        return 1;
+        return 0;
     }
     
     // check required environment
@@ -567,6 +739,12 @@ string exectuablePath = argv[0];
             MailStore store;
             store.migrate();
         });
+    }
+
+    if (mode == "install-check") {
+        // setup curl for install check
+        curl_global_init(CURL_GLOBAL_ALL);
+        return runInstallCheck();
     }
 
 	// get the account via param or stdin

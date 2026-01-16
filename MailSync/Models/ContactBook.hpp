@@ -38,7 +38,12 @@ public:
     void setURL(string url);
     string source();
     void setSource(string source);
-                          
+    string ctag();
+    void setCtag(string ctag);
+
+    string syncToken();
+    void setSyncToken(string token);
+
     string tableName();
     string constructorName();
 

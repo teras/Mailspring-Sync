@@ -100,7 +100,7 @@ MailStore::MailStore() :
     SQLite::Statement(_db, "PRAGMA main.synchronous = NORMAL").exec();
 }
 
-static int CURRENT_VERSION = 8;
+static int CURRENT_VERSION = 9;
 static string VACUUM_TIME_KEY = "VACUUM_TIME";
 static time_t VACUUM_INTERVAL = 14 * 24 * 60 * 60; // 14 days
 
@@ -150,7 +150,12 @@ void MailStore::migrate() {
             SQLite::Statement(_db, sql).exec();
         }
     }
-    
+    if (version < 9) {
+        for (string sql : V9_SETUP_QUERIES) {
+            SQLite::Statement(_db, sql).exec();
+        }
+    }
+
     // Update the version flag. Note that we don't want to go from v3 back to v2
     // if the user re-opens an older version of the app.
     if (version < CURRENT_VERSION) {
@@ -225,10 +230,16 @@ map<uint32_t, MessageAttributes> MailStore::fetchMessagesAttributesInRange(Range
     
     // Range is uint64_t, and "*" is represented by UINT64_MAX.
     // SQLite doesn't support UINT64 and the conversion /can/ fail.
+    // Additionally, clamp to LLONG_MAX if the sum would overflow.
     if (range.length == UINT64_MAX) {
         query.bind(4, LLONG_MAX);
     } else {
-        query.bind(4, (long long)(range.location + range.length));
+        uint64_t rangeEnd = range.location + range.length;
+        if (rangeEnd > static_cast<uint64_t>(LLONG_MAX)) {
+            query.bind(4, LLONG_MAX);
+        } else {
+            query.bind(4, static_cast<long long>(rangeEnd));
+        }
     }
 
     map<uint32_t, MessageAttributes> results {};
@@ -296,9 +307,16 @@ vector<shared_ptr<Label>> MailStore::allLabelsCache(string accountId) {
 
 void MailStore::beginTransaction() {
     assertCorrectThread();
-    _stmtBeginTransaction.exec();
-    _stmtBeginTransaction.reset();
-    _transactionOpen = true;
+    try {
+        _stmtBeginTransaction.exec();
+        _stmtBeginTransaction.reset();
+        _transactionOpen = true;
+    } catch (...) {
+        // Always reset the statement so it can be reused, even if exec() failed.
+        // This ensures the statement's internal state is consistent for future calls.
+        _stmtBeginTransaction.reset();
+        throw;
+    }
 }
 
 
@@ -308,9 +326,18 @@ void MailStore::rollbackTransaction() {
     _saveUpdateQueries = {};
     _saveInsertQueries = {};
     _removeQueries = {};
-    _stmtRollbackTransaction.exec();
-    _stmtRollbackTransaction.reset();
-    _transactionOpen = false;
+    try {
+        _stmtRollbackTransaction.exec();
+        _stmtRollbackTransaction.reset();
+        _transactionOpen = false;
+    } catch (...) {
+        // Always reset the statement so it can be reused, even if exec() failed.
+        // Also clear transaction state since the transaction is no longer valid
+        // after a failed rollback attempt.
+        _stmtRollbackTransaction.reset();
+        _transactionOpen = false;
+        throw;
+    }
 }
 
 // This method allows you to perform work in a transaction and then prevent the
@@ -323,16 +350,23 @@ void MailStore::unsafeEraseTransactionDeltas() {
 }
 
 void MailStore::commitTransaction() {
-    _stmtCommitTransaction.exec();
-    _stmtCommitTransaction.reset();
-    
+    try {
+        _stmtCommitTransaction.exec();
+        _stmtCommitTransaction.reset();
+    } catch (...) {
+        // Always reset the statement so it can be reused, even if exec() failed.
+        // Note: We do NOT clear _transactionOpen here because a failed commit
+        // may leave the transaction still active (e.g., SQLITE_BUSY allows retry).
+        _stmtCommitTransaction.reset();
+        throw;
+    }
+
     // emit all of the deltas
     if (_transactionDeltas.size()) {
         SharedDeltaStream()->emit(_transactionDeltas, _streamMaxDelay);
         _transactionDeltas = {};
     }
     _transactionOpen = false;
-
 }
 
 void MailStore::save(MailModel * model) {
@@ -359,6 +393,7 @@ void MailStore::save(MailModel * model) {
         }
         auto query = _saveUpdateQueries[tableName];
         query->reset();
+        query->clearBindings();
         model->bindToQuery(query.get());
         query->exec();
         
@@ -379,6 +414,7 @@ void MailStore::save(MailModel * model) {
         
         auto query = _saveInsertQueries[tableName];
         query->reset();
+        query->clearBindings();
         model->bindToQuery(query.get());
         query->exec();
     }
@@ -423,6 +459,7 @@ void MailStore::remove(MailModel * model) {
     }
     auto query = _removeQueries[tableName];
     query->reset();
+    query->clearBindings();
     query->bind(1, model->id());
     query->exec();
 
@@ -478,16 +515,17 @@ vector<shared_ptr<MailModel>> MailStore::findAllGeneric(string type, Query query
     assert(false);
 }
 
-vector<Metadata> MailStore::findAndDeleteDetatchedPluginMetadata(string accountId, string objectId) {
+vector<Metadata> MailStore::findAndDeleteDetachedPluginMetadata(string accountId, string objectId) {
     assertCorrectThread();
     if (!_saveInsertQueries.count("metadata")) {
         auto stmt = make_shared<SQLite::Statement>(db(), "SELECT version, value, pluginId, objectType FROM DetatchedPluginMetadata WHERE objectId = ? AND accountId = ?");
         _saveInsertQueries["metadata"] = stmt;
     }
-    
+
     vector<Metadata> results;
     auto st = _saveInsertQueries["metadata"];
     st->reset();
+    st->clearBindings();
     st->bind(1, objectId);
     st->bind(2, accountId);
     while (st->executeStep()) {
@@ -509,7 +547,7 @@ vector<Metadata> MailStore::findAndDeleteDetatchedPluginMetadata(string accountI
     return results;
 }
 
-void MailStore::saveDetatchedPluginMetadata(Metadata & m) {
+void MailStore::saveDetachedPluginMetadata(Metadata & m) {
     assertCorrectThread();
     SQLite::Statement st(db(), "REPLACE INTO DetatchedPluginMetadata (objectId, objectType, accountId, pluginId, value, version) VALUES (?,?,?,?,?,?)");
     st.bind(1, m.objectId);

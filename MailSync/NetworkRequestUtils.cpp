@@ -16,34 +16,31 @@
 #include "MailUtils.hpp"
 
 #include <sys/stat.h>
+#include <vector>
+#include <cstdlib>
+#include <cstring>
 
-string FindLinuxCertsBundle() {
-#ifdef __linux__
-    std::string certificatePaths[] = {
-        // Debian, Ubuntu, Arch: maintained by update-ca-certificates
-        "/etc/ssl/certs/ca-certificates.crt",
-        // Red Hat 5+, Fedora, Centos
-        "/etc/pki/tls/certs/ca-bundle.crt",
-        // Red Hat 4
-        "/usr/share/ssl/certs/ca-bundle.crt",
-        // FreeBSD (security/ca-root-nss package)
-        "/usr/local/share/certs/ca-root-nss.crt",
-        // FreeBSD (deprecated security/ca-root package, removed 2008)
-        "/usr/local/share/certs/ca-root.crt",
-        // FreeBSD (optional symlink)
-        // OpenBSD
-        "/etc/ssl/cert.pem",
-        // OpenSUSE
-        "/etc/ssl/ca-bundle.pem",
-    };
-    for (const auto path : certificatePaths) {
-        struct stat buffer;
-        if (stat (path.c_str(), &buffer) == 0) {
-            return path;
+// Structure to hold curl request data that needs cleanup
+// Stored in CURLOPT_PRIVATE to enable proper cleanup of headers
+struct CurlRequestData {
+    struct curl_slist *headers;
+
+    CurlRequestData() : headers(nullptr) {}
+};
+
+// Helper to properly cleanup a curl handle including headers stored in private data
+void CleanupCurlRequest(CURL * curl_handle) {
+    if (curl_handle == nullptr) return;
+
+    CurlRequestData *data = nullptr;
+    curl_easy_getinfo(curl_handle, CURLINFO_PRIVATE, &data);
+    if (data != nullptr) {
+        if (data->headers != nullptr) {
+            curl_slist_free_all(data->headers);
         }
+        delete data;
     }
-#endif
-    return "";
+    curl_easy_cleanup(curl_handle);
 }
 
 size_t _onAppendToString(void *contents, size_t length, size_t nmemb, void *userp) {
@@ -68,10 +65,13 @@ const json MakeOAuthRefreshRequest(string provider, string clientId, string refr
         : "";
     curl_easy_setopt(curl_handle, CURLOPT_URL, url);
     curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT, 20);
-    
-    auto c = curl_easy_escape(curl_handle, clientId.c_str(), 0);
-    auto r = curl_easy_escape(curl_handle, refreshToken.c_str(), 0);
+
+    char * c = curl_easy_escape(curl_handle, clientId.c_str(), 0);
+    char * r = curl_easy_escape(curl_handle, refreshToken.c_str(), 0);
     string payload = "grant_type=refresh_token&client_id=" + string(c) + "&refresh_token=" + string(r);
+    curl_free(c);
+    curl_free(r);
+
     if (provider == "office365" || provider == "outlook") {
         // workaround the fact that Microsoft's OAUTH flow allows you to authorize many scopes, but you
         // have to get a separate token for outlook (email + IMAP) and contacts / calendar / Microsoft Graph APIs
@@ -89,14 +89,16 @@ const json MakeOAuthRefreshRequest(string provider, string clientId, string refr
         payload += "&client_secret=" + gmailClientSecret;
     }
 
-    struct curl_slist *headers = NULL;
-    headers = curl_slist_append(headers, "Accept: application/json");
-    headers = curl_slist_append(headers, "Content-Type: application/x-www-form-urlencoded");
+    // Store headers in CurlRequestData for proper cleanup
+    CurlRequestData *requestData = new CurlRequestData();
+    requestData->headers = curl_slist_append(requestData->headers, "Accept: application/json");
+    requestData->headers = curl_slist_append(requestData->headers, "Content-Type: application/x-www-form-urlencoded");
 
     curl_easy_setopt(curl_handle, CURLOPT_CUSTOMREQUEST, "POST");
-    curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, requestData->headers);
     curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, payload.c_str());
-    
+    curl_easy_setopt(curl_handle, CURLOPT_PRIVATE, requestData);
+
     return PerformJSONRequest(curl_handle);
 }
 
@@ -105,36 +107,26 @@ CURL * CreateJSONRequest(string url, string method, string authorization, const 
     curl_easy_setopt(curl_handle, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT, 20);
 
-    struct curl_slist *headers = NULL;
+    // Store headers in CurlRequestData for proper cleanup
+    CurlRequestData *requestData = new CurlRequestData();
 
-    headers = curl_slist_append(headers, "Accept: application/json");
+    requestData->headers = curl_slist_append(requestData->headers, "Accept: application/json");
 
     if (authorization != "") {
-        headers = curl_slist_append(headers, ("Authorization: " + authorization).c_str());
+        requestData->headers = curl_slist_append(requestData->headers, ("Authorization: " + authorization).c_str());
     }
     if (payloadChars != nullptr && strlen(payloadChars) > 0) {
-        headers = curl_slist_append(headers, "Content-Type: application/json");
+        requestData->headers = curl_slist_append(requestData->headers, "Content-Type: application/json");
         curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, payloadChars);
     }
-    curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, requestData->headers);
     curl_easy_setopt(curl_handle, CURLOPT_CUSTOMREQUEST, method.c_str());
-
-
-    // Ensure /all/ curl code paths run this code for RHEL 7.6 and other linux distros
-    string explicitCertsBundlePath = FindLinuxCertsBundle();
-    if (explicitCertsBundlePath != "") {
-        curl_easy_setopt(curl_handle, CURLOPT_CAINFO, explicitCertsBundlePath.c_str());
-    }
+    curl_easy_setopt(curl_handle, CURLOPT_PRIVATE, requestData);
 
     return curl_handle;
 }
 
 const string PerformRequest(CURL * curl_handle) {
-    string explicitCertsBundlePath = FindLinuxCertsBundle();
-    if (explicitCertsBundlePath != "") {
-        curl_easy_setopt(curl_handle, CURLOPT_CAINFO, explicitCertsBundlePath.c_str());
-    }
-    
     string result;
     curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, _onAppendToString);
     curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&result);
@@ -149,11 +141,6 @@ const string PerformExpectedRedirect(string url) {
     curl_easy_setopt(curl_handle, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT, 10);
 
-    string explicitCertsBundlePath = FindLinuxCertsBundle();
-    if (explicitCertsBundlePath != "") {
-        curl_easy_setopt(curl_handle, CURLOPT_CAINFO, explicitCertsBundlePath.c_str());
-    }
-    
     string result;
     curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, _onAppendToString);
     curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&result);
@@ -181,7 +168,7 @@ const json PerformJSONRequest(CURL * curl_handle) {
     } catch (json::exception &) {
         resultJSON = {{"text", result}};
     }
-    curl_easy_cleanup(curl_handle);
+    CleanupCurlRequest(curl_handle);
     return resultJSON;
 }
 
@@ -193,15 +180,15 @@ void ValidateRequestResp(CURLcode res, CURL * curl_handle, string resp) {
     string url { _url };
 
     if (res != CURLE_OK) {
-        curl_easy_cleanup(curl_handle);
+        CleanupCurlRequest(curl_handle);
         throw SyncException(res, url);
     }
-    
+
     long http_code = 0;
     curl_easy_getinfo(curl_handle, CURLINFO_RESPONSE_CODE, &http_code);
 
     if (http_code < 200 || http_code > 209) {
-        curl_easy_cleanup(curl_handle); // note: cleans up _url;
+        CleanupCurlRequest(curl_handle); // note: cleans up _url;
         
         bool retryable = ((http_code != 403) && (http_code != 401));
         if (resp.find("invalid_grant") != string::npos) {

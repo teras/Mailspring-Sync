@@ -82,6 +82,7 @@ void SyncWorker::idleInterrupt()
 
 void SyncWorker::idleQueueBodiesToSync(vector<string> & ids) {
     // called on main thread
+    std::unique_lock<std::mutex> lck(idleMtx);
     for (string & id : ids) {
         idleFetchBodyIDs.push_back(id);
     }
@@ -90,13 +91,37 @@ void SyncWorker::idleQueueBodiesToSync(vector<string> & ids) {
 void SyncWorker::idleCycleIteration()
 {
     // Run body requests from the client
-    while (idleFetchBodyIDs.size() > 0) {
-        string id = idleFetchBodyIDs.back();
-        idleFetchBodyIDs.pop_back();
+    while (true) {
+        string id;
+        {
+            std::unique_lock<std::mutex> lck(idleMtx);
+            if (idleFetchBodyIDs.empty()) {
+                break;
+            }
+            id = idleFetchBodyIDs.back();
+            idleFetchBodyIDs.pop_back();
+        }
         Query byId = Query().equal("id", id);
         auto msg = store->find<Message>(byId);
         if (msg.get() != nullptr) {
             logger->info("Fetching body for message ID {}", msg->id());
+
+            // Check if session is connected before attempting fetch
+            if (session.isDisconnected()) {
+                logger->warn("IMAP session not connected, connecting before body fetch");
+                ErrorCode connectErr = ErrorCode::ErrorNone;
+                session.connectIfNeeded(&connectErr);
+                if (connectErr != ErrorCode::ErrorNone) {
+                    logger->error("Failed to connect for body fetch: {}", ErrorCodeToTypeMap[connectErr]);
+                    continue;
+                }
+                session.loginIfNeeded(&connectErr);
+                if (connectErr != ErrorCode::ErrorNone) {
+                    logger->error("Failed to login for body fetch: {}", ErrorCodeToTypeMap[connectErr]);
+                    continue;
+                }
+            }
+
             syncMessageBody(msg.get());
         }
     }
@@ -181,7 +206,10 @@ void SyncWorker::idleCycleIteration()
     }
     
     // Check for mail in the preferred idle folder (inbox / all)
-    bool hasStartedSyncingFolder = inbox->localStatus().count(LS_SYNCED_MIN_UID) > 0;
+    // Must verify both key presence AND that value is a number (not null) to prevent
+    // JSON type_error exception when calling .get<uint32_t>() below
+    bool hasStartedSyncingFolder = inbox->localStatus().count(LS_SYNCED_MIN_UID) > 0 &&
+                                   inbox->localStatus()[LS_SYNCED_MIN_UID].is_number();
 
     if (hasStartedSyncingFolder) {
         String path = AS_MCSTR(inbox->path());
@@ -197,7 +225,10 @@ void SyncWorker::idleCycleIteration()
             uint32_t syncedMinUID = inbox->localStatus()[LS_SYNCED_MIN_UID].get<uint32_t>();
             uint32_t bottomUID = store->fetchMessageUIDAtDepth(*inbox, 100, uidnext);
             if (bottomUID < syncedMinUID) { bottomUID = syncedMinUID; }
-            syncFolderUIDRange(*inbox, RangeMake(bottomUID, uidnext - bottomUID), false);
+            // Guard against underflow if uidnext <= bottomUID (server inconsistency)
+            if (uidnext > bottomUID) {
+                syncFolderUIDRange(*inbox, RangeMake(bottomUID, uidnext - bottomUID), false);
+            }
             inbox->localStatus()[LS_LAST_SHALLOW] = time(0);
             inbox->localStatus()[LS_UIDNEXT] = uidnext;
         }
@@ -219,6 +250,9 @@ void SyncWorker::idleCycleIteration()
         session.idle(&path, 0, &err);
         session.unsetupIdle();
         logger->info("Idle exited with code {}", err);
+        if (err != ErrorNone) {
+            throw SyncException(err, "idle");
+        }
     } else {
         logger->info("Connection does not support idling. Locking until more to do...");
         std::unique_lock<std::mutex> lck(idleMtx);
@@ -407,7 +441,10 @@ bool SyncWorker::syncNow()
                 if (bottomUID < syncedMinUID) {
                     bottomUID = syncedMinUID;
                 }
-                syncFolderUIDRange(*folder, RangeMake(bottomUID, remoteUidnext - bottomUID), false);
+                // Guard against underflow if remoteUidnext <= bottomUID (server inconsistency)
+                if (remoteUidnext > bottomUID) {
+                    syncFolderUIDRange(*folder, RangeMake(bottomUID, remoteUidnext - bottomUID), false);
+                }
                 localStatus[LS_LAST_SHALLOW] = time(0);
                 localStatus[LS_UIDNEXT] = remoteUidnext;
             }
@@ -559,6 +596,7 @@ vector<shared_ptr<Folder>> SyncWorker::syncFoldersAndLabels()
             }
             logger->error("Created required Mailspring folder: {}.", desiredPath->UTF8Characters());
             IMAPFolder * fake = new IMAPFolder();
+            fake->autorelease();
             fake->setPath(desiredPath);
             fake->setDelimiter(session.defaultNamespace()->mainDelimiter());
             remoteFolders->addObject(fake);
@@ -1049,6 +1087,16 @@ void SyncWorker::syncMessageBody(Message * message) {
 
         throw SyncException(err, "syncMessageBody - fetchMessageByUID");
     }
+    if (data == nullptr) {
+        logger->error("fetchMessageByUID returned null data for message \"{}\" ({} UID {})",
+                      message->subject(), folderPath, message->remoteUID());
+        return;
+    }
     MessageParser * messageParser = MessageParser::messageParserWithData(data);
+    if (messageParser == nullptr) {
+        logger->error("MessageParser::messageParserWithData returned null for message \"{}\" ({} UID {})",
+                      message->subject(), folderPath, message->remoteUID());
+        return;
+    }
     processor->retrievedMessageBody(message, messageParser);
 }

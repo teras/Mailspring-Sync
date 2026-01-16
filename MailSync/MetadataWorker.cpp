@@ -77,7 +77,10 @@ void MetadataWorker::fetchDeltasBlocking() {
     platform = "darwin";
 #endif
     const char * a = account->IMAPHost().c_str();
-    string aEscaped = curl_escape(a, (int)strlen(a));
+    char * aEscapedPtr = curl_escape(a, (int)strlen(a));
+    string aEscaped = aEscapedPtr;
+    curl_free(aEscapedPtr);
+
     CURL * curl_handle = CreateIdentityRequest("/deltas/" + account->id() + "/streaming?p=" + platform + "&ih=" + aEscaped + "&cursor=" + deltasCursor);
     curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, _onDeltaData);
     curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)this);
@@ -101,7 +104,7 @@ void MetadataWorker::fetchDeltasBlocking() {
     }
 
     ValidateRequestResp(res, curl_handle, "");
-    curl_easy_cleanup(curl_handle);
+    CleanupCurlRequest(curl_handle);
 }
 
 void MetadataWorker::setDeltaCursor(string cursor) {
@@ -169,7 +172,7 @@ void MetadataWorker::applyMetadataJSON(const json & metadataJSON) {
             // save to waiting table - when mailsync saves this model, it will attach
             // and remove the metadata if it's available
             logger->info(" -- Local model is not present. Saving to waiting table.");
-            store->saveDetatchedPluginMetadata(m);
+            store->saveDetachedPluginMetadata(m);
         }
         
         transaction.commit();

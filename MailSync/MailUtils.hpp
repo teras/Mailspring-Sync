@@ -49,6 +49,7 @@ public:
     static string contactKeyForEmail(string email);
 
     static string localTimestampForTime(time_t time);
+    static string formatDateTimeUTC(time_t time);
 
     static vector<uint32_t> uidsOfArray(Array * array);
     
@@ -66,7 +67,7 @@ public:
     static void setBaseIDVersion(time_t identityCreationDate);
 
     static string idRandomlyGenerated();
-    static string idForEvent(string accountId, string calendarId, string etag);
+    static string idForEvent(string accountId, string calendarId, string icsUID, string recurrenceId = "");
     static string idForCalendar(string accountId, string url);
     static string idForMessage(string accountId, string folderPath, IMAPMessage * msg);
     static string idForFolder(string accountId, string folderPath);

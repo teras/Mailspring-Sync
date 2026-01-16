@@ -5,6 +5,11 @@
 #include <libetpan/libetpan.h>
 #include <string.h>
 #include <stdlib.h>
+#ifdef _MSC_VER
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#endif
 
 #include "MCDefines.h"
 #include "MCIMAPSearchExpression.h"
@@ -401,6 +406,7 @@ void IMAPSession::init()
     mRamblerRuServer = false;
     mHermesServer = false;
     mQipServer = false;
+    mOutlookServer = false;
     mLastFetchedSequenceNumber = 0;
     mCurrentFolder = NULL;
     pthread_mutex_init(&mIdleLock, NULL);
@@ -610,6 +616,31 @@ static void logger(mailimap * imap, int log_type, const char * buffer, size_t si
     session->unlockConnectionLogger();
 }
 
+static bool isIPAddress(const char * hostname)
+{
+    // Check if hostname is an IPv4 or IPv6 address
+    // SNI should only be used for hostnames, not IP addresses
+    struct in_addr ipv4addr;
+    struct in6_addr ipv6addr;
+    if (inet_pton(AF_INET, hostname, &ipv4addr) == 1) {
+        return true;
+    }
+    if (inet_pton(AF_INET6, hostname, &ipv6addr) == 1) {
+        return true;
+    }
+    return false;
+}
+
+static void ssl_callback(struct mailstream_ssl_context * ssl_context, void * data)
+{
+    // Set the Server Name Indication (SNI) for TLS connections
+    // SNI only makes sense for hostnames, not IP addresses
+    const char * hostname = (const char *) data;
+    if (hostname != NULL && !isIPAddress(hostname)) {
+        mailstream_ssl_set_server_name(ssl_context, (char *) hostname);
+    }
+}
+
 void IMAPSession::setup()
 {
     MCAssert(mImap == NULL);
@@ -666,24 +697,31 @@ void IMAPSession::connect(ErrorCode * pError)
             goto close;
         }
 
-        r = mailimap_socket_starttls(mImap);
+        r = mailimap_socket_starttls_with_callback(mImap, ssl_callback, (void *) MCUTF8(mHostname));
         if (hasError(r)) {
             MCLog("no TLS %i", r);
             * pError = ErrorTLSNotAvailable;
             goto close;
         }
+        if (!checkCertificate()) {
+            MCLog("StartTLS ssl connect certificate ERROR %d", r);
+            * pError = ErrorCertificate;
+            goto close;
+        }
+
         break;
 
         case ConnectionTypeTLS:
-        r = mailimap_ssl_connect_voip(mImap, MCUTF8(mHostname), mPort, isVoIPEnabled());
-        MCLog("ssl connect %s %u %u", MCUTF8(mHostname), mPort, r);
+        r = mailimap_ssl_connect_voip_with_callback(mImap, MCUTF8(mHostname), mPort, isVoIPEnabled(),
+            ssl_callback, (void *) MCUTF8(mHostname));
+        MCLog("TLS ssl connect %s %u %u", MCUTF8(mHostname), mPort, r);
         if (hasError(r)) {
             MCLog("connect error %i", r);
             * pError = ErrorConnection;
             goto close;
         }
         if (!checkCertificate()) {
-            MCLog("ssl connect certificate ERROR %d", r);
+            MCLog("TLS ssl connect certificate ERROR %d", r);
             * pError = ErrorCertificate;
             goto close;
         }
@@ -727,6 +765,7 @@ void IMAPSession::connect(ErrorCode * pError)
         mRamblerRuServer = (mHostname->locationOfString(MCSTR(".rambler.ru")) != -1);
         mHermesServer = (mWelcomeString->locationOfString(MCSTR("Hermes")) != -1);
         mQipServer = (mWelcomeString->locationOfString(MCSTR("QIP IMAP server")) != -1);
+        mOutlookServer = (mHostname->locationOfString(MCSTR(".outlook.com")) != -1);
     }
     
     mState = STATE_CONNECTED;
@@ -2060,10 +2099,9 @@ void IMAPSession::expunge(String * folder, ErrorCode * pError)
     * pError = ErrorNone;
 }
 
-static int
-fetch_imap(mailimap * imap, bool identifier_is_uid, uint32_t identifier,
-           struct mailimap_fetch_type * fetch_type,
-           char ** result, size_t * result_len)
+int IMAPSession::fetch_imap(mailimap * imap, bool identifier_is_uid, uint32_t identifier,
+                            struct mailimap_fetch_type * fetch_type,
+                            char ** result, size_t * result_len)
 {
     int r;
     struct mailimap_msg_att * msg_att;
@@ -2120,13 +2158,21 @@ fetch_imap(mailimap * imap, bool identifier_is_uid, uint32_t identifier,
     }
     
     mailimap_fetch_list_free(fetch_result);
-    
-    if (text == NULL)
-        return MAILIMAP_ERROR_FETCH;
-    
+
+    if (text == NULL) {
+        if (mOutlookServer) {
+            // Outlook.com IMAP server omits some parts and returns them as
+            // zero-length when there is a vCalendar part in the message
+            text_length = 0;
+        }
+        else {
+            return MAILIMAP_ERROR_FETCH;
+        }
+    }
+
     * result = text;
     * result_len = text_length;
-    
+
     return MAILIMAP_NO_ERROR;
 }
 
@@ -2611,7 +2657,17 @@ IMAPSyncResult * IMAPSession::fetchMessages(String * folder, IMAPMessagesRequest
         struct mailimap_section * section;
         
         imap_hdrlist = mailimap_header_list_new(hdrlist);
-        section = mailimap_section_new_header_fields(imap_hdrlist);
+        
+        /*
+         * If the IMAPRequestKindFullHeaders is set then we have to fetch the full headers 
+         * otherwise only the specified list of headers 
+         */
+        if ((requestKind & IMAPMessagesRequestKindAllHeaders) != 0) {
+           section = mailimap_section_new_header();
+        } else {
+           section = mailimap_section_new_header_fields(imap_hdrlist);
+        }
+
         fetch_att = mailimap_fetch_att_new_body_peek_section(section);
         mailimap_fetch_type_new_fetch_att_list_add(fetch_type, fetch_att);
         needsHeader = true;
@@ -2787,8 +2843,8 @@ Array * IMAPSession::fetchMessagesByNumberWithExtraHeaders(String * folder, IMAP
     return result;
 }
 
-static int fetch_rfc822(mailimap * session, bool identifier_is_uid,
-                        uint32_t identifier, char ** result, size_t * result_len)
+int IMAPSession::fetch_rfc822(mailimap * session, bool identifier_is_uid,
+                              uint32_t identifier, char ** result, size_t * result_len)
 {
     struct mailimap_section * section;
     struct mailimap_fetch_att * fetch_att;

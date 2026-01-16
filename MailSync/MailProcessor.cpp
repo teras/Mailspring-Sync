@@ -127,6 +127,11 @@ shared_ptr<Message> MailProcessor::insertMessage(IMAPMessage * mMsg, Folder & fo
             tQuery.bind(2, msg->headerMessageId());
             for (int i = 0; i < refcount; i ++) {
                 String * ref = (String *)references->objectAtIndex(i);
+                // Skip null entries that could arise from malformed reference headers
+                if (ref == nullptr) {
+                    tQuery.bind(3 + i, "");
+                    continue;
+                }
                 tQuery.bind(3 + i, ref->UTF8Characters());
             }
             if (tQuery.executeStep()) {
@@ -246,14 +251,25 @@ void MailProcessor::retrievedMessageBody(Message * message, MessageParser * pars
     // times to retrieve attachments, relatedAttachments, message HTML separately. The code seems to build
     // and discard things you don't ask for.
     String * html = parser->htmlRenderingAndAttachments(htmlCallback, partAttachments, htmlInlineAttachments);
+    if (html == NULL) {
+        logger->warn("Failed to render message body for message {}: parser returned null", message->id());
+        MC_SAFE_RELEASE(htmlCallback);
+        return;
+    }
     String * text = html;
-    
+
     if (html->hasPrefix(MCSTR("PLAINTEXT:"))) {
         text = html->substringFromIndex(10);
         bodyRepresentation = text->UTF8Characters();
         bodyIsPlaintext = true;
     } else {
-        text = html->flattenHTML()->stripWhitespace();
+        String * flattenedHTML = html->flattenHTML();
+        if (flattenedHTML != NULL) {
+            text = flattenedHTML->stripWhitespace();
+        } else {
+            // flattenHTML failed, use empty string to avoid crash
+            text = MCSTR("");
+        }
         bodyRepresentation = html->UTF8Characters();
         bodyIsPlaintext = false;
     }
@@ -504,14 +520,32 @@ void MailProcessor::upsertThreadReferences(string threadId, string accountId, st
     query.exec();
     query.reset();
 
-    // todo: technically, we should look at the first reference (Start of thread)
-    // and then the last N, where N is some number we give a shit about, but we've
-    // rarely seen more than 100 items.
-    for (int i = 0; i < min(100, (int)references->count()); i ++) {
-        String * address = (String*)references->objectAtIndex(i);
-        query.bind(3, address->UTF8Characters());
+    // Index the first reference (thread root) and last N-1 references (most recent).
+    // This ensures thread continuity through the root while keeping recent messages connected.
+    // If count <= MAX_REFS, all references are indexed.
+    const int MAX_REFS = 100;
+    int count = (int)references->count();
+    int lastNCount = min(MAX_REFS - 1, count - 1);
+    int lastNStart = count - lastNCount;
+
+    // Index first reference (thread root)
+    if (count > 0) {
+        String * firstRef = (String*)references->objectAtIndex(0);
+        query.bind(3, firstRef->UTF8Characters());
         query.exec();
         query.reset(); // does not clear bindings 1 and 2! https://sqlite.org/c3ref/reset.html
+    }
+
+    // Index last N-1 references (most recent), skipping index 0 to avoid duplicate
+    for (int i = max(1, lastNStart); i < count; i++) {
+        String * address = (String*)references->objectAtIndex(i);
+        // Skip null entries that could arise from malformed reference headers
+        if (address == nullptr) {
+            continue;
+        }
+        query.bind(3, address->UTF8Characters());
+        query.exec();
+        query.reset();
     }
 }
 
@@ -572,8 +606,17 @@ void MailProcessor::upsertContacts(Message * message) {
 
     // insert remaining items
     for (auto & result : byEmail) {
+        string name = result.second.count("name") ? result.second["name"].get<string>() : "";
+        string email = result.second.count("email") ? result.second["email"].get<string>() : "";
+
+        // "Mailspring Team" is used in the welcome email sent from the user's own address.
+        // Skip creating the contact to avoid saving the wrong display name.
+        if (name == "Mailspring Team" && email.find("@getmailspring.com") == string::npos) {
+            continue;
+        }
+
         auto c = make_shared<Contact>(result.first, message->accountId(), result.first, 0, CONTACT_SOURCE_MAIL);
-        c->setName(result.second.count("name") ? result.second["name"].get<string>() : "");
+        c->setName(name);
         c->incrementRefs();
         store->save(c.get());
     }

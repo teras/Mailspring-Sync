@@ -21,6 +21,8 @@
 #include "GoogleContactsWorker.hpp"
 #include "File.hpp"
 #include "ContactGroup.hpp"
+#include "Event.hpp"
+#include "icalendar.h"
 #include "constants.h"
 #include "ProgressCollectors.hpp"
 #include "SyncException.hpp"
@@ -84,8 +86,12 @@ void _moveMessagesResilient(IMAPSession * session, String * path, Folder * destF
         IMAPMessagesRequestKind kind = MailUtils::messagesRequestKindFor(session->storedCapabilities(), true);
         
         if (status != nullptr) {
-            uint32_t min = status->uidNext() - (uint32_t)messages.size() * 2;
-            if (min < 1) min = 1;
+            // Calculate a safe lower bound to avoid underflow with unsigned arithmetic.
+            // We search from (uidNext - messages.size() * 2) to find the moved messages,
+            // using a multiplier of 2 to account for potential gaps in UID assignment.
+            uint32_t uidNext = status->uidNext();
+            uint32_t searchRange = (uint32_t)messages.size() * 2;
+            uint32_t min = (uidNext > searchRange) ? (uidNext - searchRange) : 1;
             IndexSet * set = IndexSet::indexSetWithRange(RangeMake(min, UINT64_MAX));
             Array * movedMessages = session->fetchMessagesByUID(destPath, kind, set, nullptr, &err);
             for (auto msg : messages) {
@@ -443,6 +449,12 @@ void TaskProcessor::performLocal(Task * task) {
         } else if (cname == "DestroyContactGroupTask") {
             performLocalDestroyContactGroup(task);
 
+        } else if (cname == "SyncbackEventTask") {
+            performLocalSyncbackEvent(task);
+
+        } else if (cname == "DestroyEventTask") {
+            performLocalDestroyEvent(task);
+
         } else {
             logger->error("Unsure of how to process this task type {}", cname);
         }
@@ -533,6 +545,12 @@ void TaskProcessor::performRemote(Task * task) {
 
             } else if (cname == "DestroyContactGroupTask") {
                 performRemoteDestroyContactGroup(task);
+
+            } else if (cname == "SyncbackEventTask") {
+                performRemoteSyncbackEvent(task);
+
+            } else if (cname == "DestroyEventTask") {
+                performRemoteDestroyEvent(task);
 
             } else {
                 logger->error("Unsure of how to process this task type {}", cname);
@@ -876,13 +894,13 @@ void TaskProcessor::performLocalDestroyContact(Task * task) {
     }
 
     {
-        store->beginTransaction();
+        MailStoreTransaction transaction{store, "performLocalDestroyContact"};
         auto deleted = store->findLargeSet<Contact>("id", contactIds);
         for (auto & c : deleted) {
             c->setHidden(true);
             store->save(c.get());
         }
-        store->commitTransaction();
+        transaction.commit();
     }
 }
 
@@ -1112,6 +1130,9 @@ void TaskProcessor::performLocalSyncbackContact(Task * task) {
 void TaskProcessor::performRemoteSyncbackContact(Task * task) {
     string id = task->data()["contact"]["id"].get<string>();
     auto contact = store->find<Contact>(Query().equal("id", id).equal("accountId", account->id()));
+    if (contact == nullptr) {
+        throw SyncException("not-found", "Contact not found for syncback", false);
+    }
 
     if (contact->source() == CONTACT_SOURCE_MAIL) {
         return;
@@ -1123,6 +1144,111 @@ void TaskProcessor::performRemoteSyncbackContact(Task * task) {
     } else {
         auto dav = make_shared<DAVWorker>(account);
         dav->writeAndResyncContact(contact);
+    }
+}
+
+
+void TaskProcessor::performLocalSyncbackEvent(Task * task) {
+    json & eventJSON = task->data()["event"];
+    string calendarId = task->data()["calendarId"].get<string>();
+
+    // Check if event already exists
+    string eventId = eventJSON.count("id") ? eventJSON["id"].get<string>() : "";
+    shared_ptr<Event> existing = nullptr;
+
+    if (eventId != "") {
+        existing = store->find<Event>(Query().equal("id", eventId));
+    }
+
+    if (existing) {
+        // UPDATE: Merge client changes into existing event
+        if (eventJSON.count("ics")) {
+            existing->setIcsData(eventJSON["ics"].get<string>());
+            // Re-parse ICS to update recurrence fields
+            ICalendar cal(existing->icsData());
+            if (!cal.Events.empty()) {
+                // Find the VEVENT matching our event's recurrenceId
+                string eventRecurrenceId = existing->recurrenceId();
+                ICalendarEvent* matchingEvent = nullptr;
+
+                for (auto icsEvent : cal.Events) {
+                    if (icsEvent->RecurrenceId == eventRecurrenceId) {
+                        matchingEvent = icsEvent;
+                        break;
+                    }
+                }
+
+                // Fall back to first event if no match
+                if (!matchingEvent) {
+                    matchingEvent = cal.Events.front();
+                }
+
+                existing->_data["rs"] = matchingEvent->DtStart.toUnix();
+                existing->_data["re"] = endOf(matchingEvent).toUnix();
+                existing->_data["icsuid"] = matchingEvent->UID;
+                existing->setRecurrenceId(matchingEvent->RecurrenceId);
+                existing->setStatus(matchingEvent->Status.empty() ? "CONFIRMED" : matchingEvent->Status);
+            }
+        }
+        store->save(existing.get());
+        task->data()["event"]["id"] = existing->id();
+    } else {
+        // CREATE: Generate new event with temporary ID
+        string tempId = MailUtils::idRandomlyGenerated();
+        string icsData = eventJSON["ics"].get<string>();
+        ICalendar cal(icsData);
+
+        if (cal.Events.empty()) {
+            throw SyncException("invalid-ics", "ICS data does not contain any events", false);
+        }
+
+        // For new event creation, use the first VEVENT (typically only one)
+        // The Event constructor now handles recurrenceId from the ICalendarEvent
+        auto icsEvent = cal.Events.front();
+        Event event("", account->id(), calendarId, icsData, icsEvent);
+        event._data["id"] = tempId;  // Temporary ID until server assigns etag
+        store->save(&event);
+
+        task->data()["event"]["id"] = tempId;
+    }
+
+    store->save(task);
+}
+
+void TaskProcessor::performRemoteSyncbackEvent(Task * task) {
+    string eventId = task->data()["event"]["id"].get<string>();
+    auto event = store->find<Event>(Query().equal("id", eventId).equal("accountId", account->id()));
+
+    if (event == nullptr) {
+        throw SyncException("not-found", "Event not found for syncback", false);
+    }
+
+    auto dav = make_shared<DAVWorker>(account);
+    dav->writeAndResyncEvent(event);
+}
+
+void TaskProcessor::performLocalDestroyEvent(Task * task) {
+    vector<string> eventIds {};
+    for (json & e : task->data()["events"]) {
+        eventIds.push_back(e["id"].get<string>());
+    }
+
+    // Mark events as hidden locally (they'll be fully removed after remote delete succeeds)
+    // Note: Unlike contacts, we don't have a "hidden" field on events, so we just
+    // leave them in place until performRemote completes.
+}
+
+void TaskProcessor::performRemoteDestroyEvent(Task * task) {
+    vector<string> eventIds {};
+    for (json & e : task->data()["events"]) {
+        eventIds.push_back(e["id"].get<string>());
+    }
+
+    auto events = store->findLargeSet<Event>("id", eventIds);
+    auto dav = make_shared<DAVWorker>(account);
+
+    for (auto & event : events) {
+        dav->deleteEvent(event);
     }
 }
 
@@ -1171,19 +1297,13 @@ void TaskProcessor::performRemoteSyncbackCategory(Task * task) {
     shared_ptr<Folder> localModel = nullptr;
     
     if (existingPath != "") {
-        if (isGmail) {
-            localModel = store->find<Label>(Query().equal("accountId", accountId).equal("id", MailUtils::idForFolder(accountId, existingPath)));
-        } else {
-            localModel = store->find<Folder>(Query().equal("accountId", accountId).equal("id", MailUtils::idForFolder(accountId, existingPath)));
-        }
+        auto query = Query().equal("accountId", accountId).equal("id", MailUtils::idForFolder(accountId, existingPath));
+        localModel = isGmail ? store->find<Label>(query) : store->find<Folder>(query);
     }
 
     if (!localModel) {
-        if (isGmail) {
-            localModel = make_shared<Label>(MailUtils::idForFolder(accountId, path), accountId, 0);
-        } else {
-            localModel = make_shared<Folder>(MailUtils::idForFolder(accountId, path), accountId, 0);
-        }
+        string id = MailUtils::idForFolder(accountId, path);
+        localModel = isGmail ? make_shared<Label>(id, accountId, 0) : make_shared<Folder>(id, accountId, 0);
     }
 
     localModel->setPath(path);
@@ -1313,25 +1433,25 @@ void TaskProcessor::performRemoteSendDraft(Task * task) {
         builder.header()->setReferences(Array::arrayWithObject(AS_MCSTR(draft.forwardedHeaderMessageId())));
     }
 
-    Array * to = new Array();
+    Array * to = Array::array();
     for (json & p : draft.to()) {
         to->addObject(MailUtils::addressFromContactJSON(p));
     }
     builder.header()->setTo(to);
-    
-    Array * cc = new Array();
+
+    Array * cc = Array::array();
     for (json & p : draft.cc()) {
         cc->addObject(MailUtils::addressFromContactJSON(p));
     }
     builder.header()->setCc(cc);
-    
-    Array * bcc = new Array();
+
+    Array * bcc = Array::array();
     for (json & p : draft.bcc()) {
         bcc->addObject(MailUtils::addressFromContactJSON(p));
     }
     builder.header()->setBcc(bcc);
 
-    Array * replyTo = new Array();
+    Array * replyTo = Array::array();
     for (json & p : draft.replyTo()) {
         replyTo->addObject(MailUtils::addressFromContactJSON(p));
     }
@@ -1497,7 +1617,7 @@ void TaskProcessor::performRemoteSendDraft(Task * task) {
             if (draft.threadId() != "") {
                 auto thread = store->find<Thread>(Query().equal("id", draft.threadId()));
                 if (thread) {
-                    Array * xgmValues = new Array();
+                    Array * xgmValues = Array::array();
                     for (auto & l : thread->labels()) {
                         string role = l["role"].get<string>();
                         if (role == "inbox" || role == "sent" || role == "drafts") { continue; }
@@ -1675,11 +1795,18 @@ void TaskProcessor::performRemoteGetMessageRFC2822(Task * task) {
     const auto filepath = task->data()["filepath"].get<string>();
     
     auto msg = store->find<Message>(Query().equal("id", id));
+    if (msg == nullptr) {
+        throw SyncException("not-found", "Message not found for RFC2822 fetch", false);
+    }
 
     Data * data = session->fetchMessageByUID(AS_MCSTR(msg->remoteFolder()["path"].get<string>()), msg->remoteUID(), &cb, &err);
     if (err != ErrorNone) {
         logger->error("Unable to fetch rfc2822 for message (UID {}). Error {}", msg->remoteUID(), ErrorCodeToTypeMap[err]);
         throw SyncException(err, "performRemoteGetMessageRFC2822");
+    }
+    if (data == nullptr) {
+        logger->error("fetchMessageByUID returned null data for message (UID {})", msg->remoteUID());
+        throw SyncException(ErrorFetch, "performRemoteGetMessageRFC2822 - null data");
     }
 #ifdef _MSC_VER
     wstring_convert<codecvt_utf8<wchar_t>, wchar_t> convert;
@@ -1711,11 +1838,11 @@ void TaskProcessor::performRemoteSendRSVP(Task * task) {
     builder.header()->setUserAgent(MCSTR("Mailspring"));
     builder.header()->setDate(time(0));
 
-    Array * to = new Array();
+    Array * to = Array::array();
     to->addObject(Address::addressWithMailbox(AS_MCSTR(organizer)));
     builder.header()->setTo(to);
-    
-    Array * replyTo = new Array();
+
+    Array * replyTo = Array::array();
     Address * me = Address::addressWithMailbox(AS_MCSTR(account->emailAddress()));
     replyTo->addObject(me);
 

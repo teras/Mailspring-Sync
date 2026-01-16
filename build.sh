@@ -15,7 +15,8 @@ mkdir -p "$APP_DIST_DIR"
 if [[ "$OSTYPE" == "darwin"* ]]; then
   cd "$MAILSYNC_DIR"
   gem install xcpretty;
-  set -o pipefail && xcodebuild -scheme mailsync -configuration Release -destination 'generic/platform=macOS' | xcpretty;
+  # Build universal binary for both arm64 and x86_64
+  set -o pipefail && xcodebuild -scheme mailsync -configuration Release -destination 'generic/platform=macOS' ONLY_ACTIVE_ARCH=NO ARCHS="arm64 x86_64" | xcpretty;
 
   # the xcodebuild copies the build products to the APP_ROOT_DIR and codesigns
   # them for us. We just need to tar them up and move them to the artifacts folder
@@ -39,7 +40,7 @@ elif [[ "$OSTYPE" == "linux-gnu" ]]; then
   mkdir -p build
   cd build
   cmake ..
-  make
+  make MailCore  # Only build the library, not tests (tests can't link without mailsync)
 
   # build mailsync
   echo "Building Mailspring MailSync..."
@@ -58,7 +59,7 @@ elif [[ "$OSTYPE" == "linux-gnu" ]]; then
   # (We set SASL_PATH below so it finds these.)
   cp /usr/lib/x86_64-linux-gnu/sasl2/* "$APP_ROOT_DIR"
 
-  printf "#!/bin/bash\nset -e\nset -o pipefail\nSCRIPTPATH=\"\$( cd \"\$(dirname \"\$0\")\" >/dev/null 2>&1 ; pwd -P )\"\nSASL_PATH=\"\$SCRIPTPATH\" LD_LIBRARY_PATH=\"\$SCRIPTPATH;\$LD_LIBRARY_PATH\" \"\$SCRIPTPATH/mailsync.bin\" \"\$@\"" > "$APP_ROOT_DIR/mailsync"
+  printf "#!/bin/bash\nset -e\nset -o pipefail\nSCRIPTPATH=\"\$( cd \"\$(dirname \"\$0\")\" >/dev/null 2>&1 ; pwd -P )\"\nSASL_PATH=\"\$SCRIPTPATH\" LD_LIBRARY_PATH=\"\$SCRIPTPATH:\$LD_LIBRARY_PATH\" \"\$SCRIPTPATH/mailsync.bin\" \"\$@\"" > "$APP_ROOT_DIR/mailsync"
   chmod +x "$APP_ROOT_DIR/mailsync"
 
   # Zip this stuff up so we can push it to S3 as a single artifacts

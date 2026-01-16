@@ -256,7 +256,7 @@ string MailUtils::localTimestampForTime(time_t time) {
     if (time == -1) {
         time = 1;
     }
-    
+
     char buffer[32];
 #if defined(_MSC_VER)
     tm ptm;
@@ -265,6 +265,21 @@ string MailUtils::localTimestampForTime(time_t time) {
 #else
     tm * ptm = localtime(&time);
     strftime(buffer, 32, "%Y-%m-%d %H:%M:%S", ptm);
+#endif
+    return string(buffer);
+}
+
+string MailUtils::formatDateTimeUTC(time_t time) {
+    // Format time as iCalendar UTC date-time for CalDAV time-range filters
+    // Format: YYYYMMDDTHHMMSSZ (per RFC 4791 section 9.9)
+    char buffer[20];
+#if defined(_MSC_VER)
+    tm ptm;
+    gmtime_s(&ptm, &time);
+    strftime(buffer, sizeof(buffer), "%Y%m%dT%H%M%SZ", &ptm);
+#else
+    tm * ptm = gmtime(&time);
+    strftime(buffer, sizeof(buffer), "%Y%m%dT%H%M%SZ", ptm);
 #endif
     return string(buffer);
 }
@@ -541,12 +556,19 @@ void MailUtils::setBaseIDVersion(time_t identityCreationDate) {
     spdlog::get("logger")->info("Identity created at {} - using ID Schema {}", identityCreationDate, _baseIDSchemaVersion);
 }
 
-string MailUtils::idForEvent(string accountId, string calendarId, string etag) {
+string MailUtils::idForEvent(string accountId, string calendarId, string icsUID, string recurrenceId) {
+    // Use icsUID (iCalendar UID) for stable IDs across event modifications.
+    // The etag changes on every modification, but icsUID is the stable identifier.
+    // For recurring event exceptions, include recurrenceId to distinguish from master.
     string src_str = accountId;
     src_str = src_str.append("-");
     src_str = src_str.append(calendarId);
     src_str = src_str.append("-");
-    src_str = src_str.append(etag);
+    src_str = src_str.append(icsUID);
+    if (!recurrenceId.empty()) {
+        src_str = src_str.append("-");
+        src_str = src_str.append(recurrenceId);
+    }
     vector<unsigned char> hash(32);
     picosha2::hash256(src_str.begin(), src_str.end(), hash.begin(), hash.end());
     return toBase58(hash.data(), 30);
