@@ -823,9 +823,28 @@ void MessageHeader::importIMAPEnvelope(struct mailimap_envelope * env)
     if (env->env_subject != NULL) {
         char * subject;
 
-        // subject
+        // subject - decode from ENVELOPE
         subject = env->env_subject;
-        setSubject(String::stringByDecodingMIMEHeaderValue(subject));
+        String * decoded = String::stringByDecodingMIMEHeaderValue(subject);
+
+        // Check if decoded subject is corrupted (contains U+FFFD replacement characters)
+        // This can happen when IMAP server doesn't recognize the charset (e.g., Cp1253)
+        bool isCorrupted = false;
+        if (decoded != NULL && decoded->length() > 0) {
+            const UChar * chars = decoded->unicodeCharacters();
+            unsigned int len = decoded->length();
+            for (unsigned int i = 0; i < len; i++) {
+                if (chars[i] == 0xFFFD) {
+                    isCorrupted = true;
+                    break;
+                }
+            }
+        }
+
+        // Only set subject if not corrupted - let importIMAPReferences handle it otherwise
+        if (!isCorrupted) {
+            setSubject(decoded);
+        }
     }
 
     if (env->env_sender != NULL) {
@@ -948,29 +967,29 @@ void MessageHeader::importIMAPReferences(Data * data)
     }
     if (single_fields.fld_subject != NULL) {
         if (single_fields.fld_subject->sbj_value != NULL) {
-            bool broken;
-            char * value;
-            bool isASCII;
-            
-            broken = false;
-            value = single_fields.fld_subject->sbj_value;
-            
-            isASCII = true;
-            for(char * p = value ; * p != 0 ; p ++) {
-                if ((unsigned char) * p >= 128) {
-                    isASCII = false;
+            // Decode raw subject from header
+            String * rawDecoded = String::stringByDecodingMIMEHeaderValue(
+                single_fields.fld_subject->sbj_value);
+
+            if (rawDecoded != NULL && rawDecoded->length() > 0) {
+                // Check if current subject from ENVELOPE is corrupted (contains U+FFFD)
+                bool envelopeCorrupted = false;
+                if (mSubject != NULL) {
+                    // U+FFFD is the Unicode replacement character
+                    const UChar * chars = mSubject->unicodeCharacters();
+                    unsigned int len = mSubject->length();
+                    for (unsigned int i = 0; i < len; i++) {
+                        if (chars[i] == 0xFFFD) {
+                            envelopeCorrupted = true;
+                            break;
+                        }
+                    }
                 }
-            }
-            if (strstr(value, "windows-1251") == NULL) {
-                if (isASCII) {
-                    broken = true;
+
+                // Use raw subject if envelope was corrupted or subject not set
+                if (mSubject == NULL || envelopeCorrupted) {
+                    setSubject(rawDecoded);
                 }
-            }
-            
-            //MCLog("charset: %s %s", value, MCUTF8(charset));
-            
-            if (!broken) {
-                setSubject(String::stringByDecodingMIMEHeaderValue(single_fields.fld_subject->sbj_value));
             }
         }
     }
