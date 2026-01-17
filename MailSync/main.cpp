@@ -37,6 +37,7 @@
 #include "MetadataWorker.hpp"
 #include "MetadataExpirationWorker.hpp"
 #include "DAVWorker.hpp"
+#include "ExternalCardDAVWorker.hpp"
 #include "GoogleContactsWorker.hpp"
 #include "SyncException.hpp"
 #include "Task.hpp"
@@ -665,6 +666,44 @@ void runListenOnMainThread(shared_ptr<Account> account) {
                         runningCalendarSync = false;
                     }).detach();
                 }
+            }
+
+            if (type == "sync-external-carddav") {
+                // Handle external CardDAV sync with custom credentials
+                auto source = packet["source"];
+                string sourceId = source["id"].get<string>();
+                string sourceName = source["name"].get<string>();
+                string sourceUrl = source["url"].get<string>();
+                string sourceUsername = source["username"].get<string>();
+                string sourcePassword = source["password"].get<string>();
+
+                spdlog::get("logger")->info("External CardDAV sync requested for: {} ({})", sourceName, sourceUrl);
+
+                std::thread([account, sourceId, sourceName, sourceUrl, sourceUsername, sourcePassword]() {
+                    SetThreadName("ext-carddav");
+                    ExternalCardDAVSyncResult result;
+                    result.sourceId = sourceId;
+                    result.sourceName = sourceName;
+
+                    try {
+                        ExternalCardDAVWorker worker(account, sourceId, sourceName, sourceUrl, sourceUsername, sourcePassword);
+                        result = worker.run();
+                    } catch (const exception& e) {
+                        spdlog::get("logger")->error("External CardDAV sync failed for {}: {}", sourceName, e.what());
+                        result.error = e.what();
+                    }
+
+                    // Emit result back to JS
+                    json resultJson = {
+                        {"type", "external-carddav-sync-result"},
+                        {"sourceId", result.sourceId},
+                        {"sourceName", result.sourceName},
+                        {"success", result.success},
+                        {"contactCount", result.contactCount},
+                        {"error", result.error}
+                    };
+                    cout << resultJson.dump() << "\n" << flush;
+                }).detach();
             }
 
             if (type == "test-crash") {

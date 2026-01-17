@@ -46,6 +46,7 @@ public:
     vector<shared_ptr<VCardProperty>> getEmails();
     shared_ptr<VCardProperty> getFormattedName();
     shared_ptr<VCardProperty> getKind();
+    shared_ptr<VCardProperty> getPhoto();
 
     shared_ptr<VCardProperty> getName();
     void setName(string name);

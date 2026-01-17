@@ -155,6 +155,14 @@ shared_ptr<VCardProperty> VCard::getKind() {
     return propertiesWithName("KIND", true).front();
 }
 
+shared_ptr<VCardProperty> VCard::getPhoto() {
+    auto photos = propertiesWithName("PHOTO", false);
+    if (photos.size() > 0) {
+        return photos.front();
+    }
+    return nullptr;
+}
+
 shared_ptr<VCardProperty> VCard::getName() {
     return propertiesWithName("N", true).front();
 }
