@@ -2606,12 +2606,12 @@ IMAPSyncResult * IMAPSession::fetchMessages(String * folder, IMAPMessagesRequest
     }
     if ((requestKind & IMAPMessagesRequestKindHeaders) != 0) {
         char * header;
-        
+
         MCLog("request envelope");
         // envelope
         fetch_att = mailimap_fetch_att_new_envelope();
         mailimap_fetch_type_new_fetch_att_list_add(fetch_type, fetch_att);
-        
+
         // references header
         header = strdup("References");
         clist_append(hdrlist, header);
@@ -2619,6 +2619,16 @@ IMAPSyncResult * IMAPSession::fetchMessages(String * folder, IMAPMessagesRequest
             header = strdup("Subject");
             clist_append(hdrlist, header);
         }
+        // Also fetch address headers for fallback when ENVELOPE has corrupted names
+        // (e.g., when sender uses non-ASCII characters without proper MIME encoding)
+        header = strdup("From");
+        clist_append(hdrlist, header);
+        header = strdup("To");
+        clist_append(hdrlist, header);
+        header = strdup("Cc");
+        clist_append(hdrlist, header);
+        header = strdup("Reply-To");
+        clist_append(hdrlist, header);
     }
     if ((requestKind & IMAPMessagesRequestKindSize) != 0) {
         // message structure

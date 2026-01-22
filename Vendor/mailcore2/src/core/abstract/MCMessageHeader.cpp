@@ -24,6 +24,46 @@ static Array * lep_address_list_from_lep_mailbox(struct mailimf_mailbox_list * m
 static Array * msg_id_to_string_array(clist * msgids);
 static clist * msg_id_from_string_array(Array * msgids);
 
+// Helper function to check if an address display name is corrupted
+// Returns true if the name contains only control characters (0x00-0x1F) or U+FFFD
+static bool isAddressDisplayNameCorrupted(Address * address) {
+    if (address == NULL || address->displayName() == NULL || address->displayName()->length() == 0) {
+        return false;
+    }
+
+    const UChar * chars = address->displayName()->unicodeCharacters();
+    unsigned int len = address->displayName()->length();
+    bool hasNonControlChar = false;
+
+    for (unsigned int i = 0; i < len; i++) {
+        UChar c = chars[i];
+        // Check for U+FFFD (replacement character)
+        if (c == 0xFFFD) {
+            return true;
+        }
+        // Check if this is a printable character (not a control char, except space)
+        if (c > 0x1F && c != 0x7F) {
+            hasNonControlChar = true;
+        }
+    }
+
+    // If the name has no printable characters (only control chars and spaces), it's corrupted
+    return !hasNonControlChar;
+}
+
+// Helper to check if any address in an array has corrupted display name
+static bool isAddressArrayCorrupted(Array * addresses) {
+    if (addresses == NULL) {
+        return false;
+    }
+    mc_foreacharray(Address, address, addresses) {
+        if (isAddressDisplayNameCorrupted(address)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 #define MAX_HOSTNAME 512
 
 MessageHeader::MessageHeader()
@@ -993,7 +1033,45 @@ void MessageHeader::importIMAPReferences(Data * data)
             }
         }
     }
-    
+
+    // Fix corrupted From address from raw headers
+    if (single_fields.fld_from != NULL) {
+        if (mFrom == NULL || isAddressDisplayNameCorrupted(mFrom)) {
+            struct mailimf_mailbox_list * mb_list = single_fields.fld_from->frm_mb_list;
+            Array * addresses = lep_address_list_from_lep_mailbox(mb_list);
+            if (addresses->count() > 0) {
+                setFrom((Address *) addresses->objectAtIndex(0));
+            }
+        }
+    }
+
+    // Fix corrupted To addresses from raw headers
+    if (single_fields.fld_to != NULL) {
+        if (mTo == NULL || isAddressArrayCorrupted(mTo)) {
+            struct mailimf_address_list * addr_list = single_fields.fld_to->to_addr_list;
+            Array * addresses = lep_address_list_from_lep_addr(addr_list);
+            setTo(addresses);
+        }
+    }
+
+    // Fix corrupted Cc addresses from raw headers
+    if (single_fields.fld_cc != NULL) {
+        if (mCc == NULL || isAddressArrayCorrupted(mCc)) {
+            struct mailimf_address_list * addr_list = single_fields.fld_cc->cc_addr_list;
+            Array * addresses = lep_address_list_from_lep_addr(addr_list);
+            setCc(addresses);
+        }
+    }
+
+    // Fix corrupted ReplyTo addresses from raw headers
+    if (single_fields.fld_reply_to != NULL) {
+        if (mReplyTo == NULL || isAddressArrayCorrupted(mReplyTo)) {
+            struct mailimf_address_list * addr_list = single_fields.fld_reply_to->rt_addr_list;
+            Array * addresses = lep_address_list_from_lep_addr(addr_list);
+            setReplyTo(addresses);
+        }
+    }
+
     mailimf_fields_free(fields);
 }
 
