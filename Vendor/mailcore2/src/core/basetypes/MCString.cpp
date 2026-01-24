@@ -1176,6 +1176,27 @@ String * String::stringByDecodingMIMEHeaderValue(const char * phrase)
     }
 
     if (!hasEncoding) {
+        // First try UTF-8 directly - modern email systems typically use UTF-8
+        // and charset detection can wrongly identify UTF-8 as ISO-8859-?
+        String * utf8Result = stringWithUTF8Characters(phrase);
+        if (utf8Result != NULL && utf8Result->length() > 0) {
+            // Check ratio of valid characters vs replacement characters
+            // If UTF-8 parsing mostly succeeded (>80% valid chars), use the UTF-8 result
+            // This handles cases where the data has some corruption but is mostly UTF-8
+            const UChar * chars = utf8Result->unicodeCharacters();
+            unsigned int len = utf8Result->length();
+            unsigned int replacementCount = 0;
+            for (unsigned int i = 0; i < len; i++) {
+                if (chars[i] == 0xFFFD) {
+                    replacementCount++;
+                }
+            }
+            // If less than 20% are replacement chars, consider it valid UTF-8
+            if (replacementCount == 0 || (len > 0 && replacementCount * 100 / len < 20)) {
+                return utf8Result;
+            }
+        }
+        // Fall back to charset detection if UTF-8 interpretation failed significantly
         return Data::dataWithBytes(phrase, (unsigned int) strlen(phrase))->stringWithDetectedCharset();
     }
 
