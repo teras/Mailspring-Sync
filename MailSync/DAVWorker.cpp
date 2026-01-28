@@ -416,10 +416,30 @@ void DAVWorker::runContacts() {
 
     // First sync or after cache invalidation: perform full discovery
     if (!contactsDiscoveryComplete) {
-        logger->info("Performing full CardDAV address book discovery");
-        cachedAddressBook = resolveAddressBook();
-        contactsDiscoveryComplete = true;
-        contactsValidationFailures = 0;
+        try {
+            logger->info("Performing full CardDAV address book discovery");
+            cachedAddressBook = resolveAddressBook();
+            contactsDiscoveryComplete = true;
+            contactsValidationFailures = 0;
+        } catch (SyncException & e) {
+            // Handle servers that don't support CardDAV (return 404 Not Found, 405 Method Not Allowed,
+            // or 406 Not Acceptable). Log the error and skip contact sync rather than crashing.
+            if (e.key.find("404") != string::npos || e.key.find("405") != string::npos || e.key.find("406") != string::npos) {
+                logger->info("CardDAV not supported by server ({}), skipping contact sync", e.key);
+                contactsDiscoveryComplete = true;
+                cachedAddressBook = nullptr;
+                return;
+            }
+            // Handle network errors during discovery (DNS resolution failure, connection refused, etc.)
+            // These indicate the CardDAV server is unreachable - skip contact sync rather than crashing.
+            if (e.isOffline()) {
+                logger->info("CardDAV server unreachable during discovery ({}), skipping contact sync", e.key);
+                contactsDiscoveryComplete = true;
+                cachedAddressBook = nullptr;
+                return;
+            }
+            throw;
+        }
 
         if (cachedAddressBook == nullptr) {
             return;
@@ -499,8 +519,9 @@ bool DAVWorker::validateCachedAddressBook() {
     } catch (const SyncException& e) {
         contactsValidationFailures++;
 
-        // URL definitively invalid (deleted, moved, etc.)
+        // URL definitively invalid (deleted, moved, not acceptable, etc.)
         if (e.key.find("404") != string::npos ||
+            e.key.find("406") != string::npos ||
             e.key.find("410") != string::npos) {
             logger->info("Address book URL returned {}, invalidating cache", e.key);
             return false;
@@ -1156,7 +1177,25 @@ void DAVWorker::runCalendars() {
         "<ical:calendar-order />"
         "</d:prop>"
         "</d:propfind>";
-    auto calendarSetDoc = performXMLRequest(calHost + calPrincipal, "PROPFIND", propfindQuery);
+
+    shared_ptr<DavXML> calendarSetDoc;
+    try {
+        calendarSetDoc = performXMLRequest(calHost + calPrincipal, "PROPFIND", propfindQuery);
+    } catch (SyncException & e) {
+        // Handle servers that don't support CalDAV (return 404 Not Found, 405 Method Not Allowed,
+        // or 406 Not Acceptable). Log the error and skip calendar sync rather than crashing.
+        if (e.key.find("404") != string::npos || e.key.find("405") != string::npos || e.key.find("406") != string::npos) {
+            logger->info("CalDAV not supported by server ({}), skipping calendar sync", e.key);
+            return;
+        }
+        // Handle network errors during discovery (DNS resolution failure, connection refused, etc.)
+        // These indicate the CalDAV server is unreachable - skip calendar sync rather than crashing.
+        if (e.isOffline()) {
+            logger->info("CalDAV server unreachable during discovery ({}), skipping calendar sync", e.key);
+            return;
+        }
+        throw;
+    }
 
     auto local = store->findAllMap<Calendar>(Query().equal("accountId", account->id()), "id");
 

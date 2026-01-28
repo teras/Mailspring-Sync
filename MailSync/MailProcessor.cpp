@@ -182,7 +182,41 @@ void MailProcessor::updateMessage(Message * local, IMAPMessage * remote, Folder 
     auto updated = MessageAttributesForMessage(remote);
     auto jlabels = json(updated.labels);
 
-    
+    // Priority folder check: prevent lower-priority folders from claiming messages
+    // that already belong to higher-priority folders. This fixes "flickering" on
+    // iCloud where the same message exists in multiple folders.
+    string currentFolderId = local->remoteFolderId();
+    if (folder.id() != currentFolderId && !currentFolderId.empty()) {
+        bool isUnlinked = local->remoteUID() > UINT32_MAX - 5;
+
+        if (isUnlinked) {
+            // Message was unlinked (deleted from current folder) - allow reclaim
+            logger->info("- Message {} was unlinked, allowing reclaim by folder {}",
+                        local->id(), folder.path());
+        } else {
+            // Compare folder priorities to determine if update is allowed
+            json currentRemoteFolder = local->remoteFolder();
+            string currentRole = "";
+            if (currentRemoteFolder.contains("role") && currentRemoteFolder["role"].is_string()) {
+                currentRole = currentRemoteFolder["role"].get<string>();
+            }
+
+            int newPriority = MailUtils::priorityForFolderRole(folder.role());
+            int currentPriority = MailUtils::priorityForFolderRole(currentRole);
+
+            if (newPriority < currentPriority) {
+                // New folder has higher priority (lower number) - allow upgrade
+                logger->info("- Message {} upgrading from {} ({}) to {} ({})",
+                            local->id(), currentFolderId, currentRole, folder.id(), folder.role());
+            } else {
+                // Current folder has equal or higher priority - skip ALL updates
+                logger->info("- Message {} staying in {} (priority {}), ignoring {} (priority {})",
+                            local->id(), currentFolderId, currentPriority, folder.id(), newPriority);
+                return;
+            }
+        }
+    }
+
     bool noChanges = true;
     if (updated.unread != local->isUnread()) {
         if (noChanges) logger->info("- Updating message {}", local->id());
@@ -352,7 +386,30 @@ void MailProcessor::retrievedMessageBody(Message * message, MessageParser * pars
         message->setPlaintext(bodyIsPlaintext);
         message->setBodyForDispatch(bodyRepresentation);
         message->setFiles(files);
-        
+
+        // extract additional headers from the full message that weren't available
+        // during initial sync (which only fetches IMAP ENVELOPE)
+        MessageHeader * msgHeader = parser->header();
+        if (msgHeader != nullptr) {
+            String * listUnsub = msgHeader->extraHeaderValueForName(MCSTR("List-Unsubscribe"));
+            String * listUnsubPost = msgHeader->extraHeaderValueForName(MCSTR("List-Unsubscribe-Post"));
+            String * xPriority = msgHeader->extraHeaderValueForName(MCSTR("X-Priority"));
+            String * importance = msgHeader->extraHeaderValueForName(MCSTR("Importance"));
+
+            if (listUnsub != nullptr) {
+                message->_data["hListUnsub"] = listUnsub->UTF8Characters();
+            }
+            if (listUnsubPost != nullptr) {
+                message->_data["hListUnsubPost"] = listUnsubPost->UTF8Characters();
+            }
+            if (xPriority != nullptr) {
+                message->_data["hXPriority"] = xPriority->UTF8Characters();
+            }
+            if (importance != nullptr) {
+                message->_data["hImportance"] = importance->UTF8Characters();
+            }
+        }
+
         store->save(message);
         
         transaction.commit();
