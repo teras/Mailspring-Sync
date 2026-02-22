@@ -212,9 +212,22 @@ void SyncWorker::idleCycleIteration()
                                    inbox->localStatus()[LS_SYNCED_MIN_UID].is_number();
 
     if (hasStartedSyncingFolder) {
+        // Process VANISHED notifications received during the previous IDLE session.
+        // The server sends VANISHED during IDLE when messages are expunged, but won't
+        // re-report them in the subsequent FETCH CHANGEDSINCE since it considers this
+        // connection already informed. We must process them here before they're lost.
+        IndexSet * idleVanished = session.idleVanishedMessages();
+        if (idleVanished != NULL && idleVanished->count() > 0) {
+            logger->info("Processing {} VANISHED UIDs from IDLE on {}", idleVanished->count(), inbox->path());
+            vector<Query> queries = MailUtils::queriesForUIDRangesInIndexSet(inbox->id(), idleVanished);
+            for (Query & query : queries) {
+                this->processor->unlinkMessagesMatchingQuery(query, unlinkPhase);
+            }
+        }
+
         String path = AS_MCSTR(inbox->path());
         IMAPFolderStatus remoteStatus = session.folderStatus(&path, &err);
-        
+
         // Note: If we have CONDSTORE but don't have QRESYNC, this if/else may result
         // in us not seeing "vanished" messages until the next shallow sync iteration.
         // Right now I think that's fine.
@@ -250,9 +263,11 @@ void SyncWorker::idleCycleIteration()
         session.idle(&path, 0, &err);
         session.unsetupIdle();
         logger->info("Idle exited with code {}", err);
-        if (err != ErrorNone) {
-            throw SyncException(err, "idle");
-        }
+        
+        // Ben Note: We don't throw these errors because Yandex (maybe others) abruptly and
+        // randomly close IDLE connections - and that's ok! The point is to idle "for a while"
+        // and then reconnect and idle again. If the reconnect fails on the next iteration,
+        // /that/ error will propagate up and trigger the `retryable=true` flow.
     } else {
         logger->info("Connection does not support idling. Locking until more to do...");
         std::unique_lock<std::mutex> lck(idleMtx);
@@ -289,8 +304,7 @@ bool SyncWorker::syncNow()
     // responses and doesn't send the ENABLED untagged response per RFC. This causes
     // messages to be incorrectly detected as deleted. Disable QRESYNC for iCloud.
     // See: https://developer.apple.com/forums/thread/694251
-    bool isICloud = account->IMAPHost().find("imap.mail.me.com") != string::npos;
-    if (isICloud && hasQResync) {
+    if (account->isICloud() && hasQResync) {
         logger->info("Disabling QRESYNC for iCloud account due to known server compatibility issues");
         hasQResync = false;
     }

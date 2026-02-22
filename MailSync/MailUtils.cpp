@@ -168,7 +168,7 @@ string MailUtils::getEnvUTF8(string key) {
     size_t wKeyLength = MultiByteToWideChar( CP_UTF8, 0, key.c_str(), (int)key.length(), 0, 0 );
     std::wstring wKey( wKeyLength, L'\0' );
     MultiByteToWideChar( CP_UTF8, 0, key.c_str(), (int)key.length(), &wKey[0], (int)wKey.length());
-    
+
     wchar_t wstr[MAX_PATH];
     size_t len = _countof(wstr);
     _wgetenv_s(&len, wstr, len, wKey.c_str());
@@ -181,6 +181,24 @@ string MailUtils::getEnvUTF8(string key) {
         return "";
     }
     return string(val);
+#endif
+}
+
+bool MailUtils::setEnvUTF8(string key, string value) {
+#if defined(_MSC_VER)
+    // Convert key to wide string
+    size_t wKeyLength = MultiByteToWideChar(CP_UTF8, 0, key.c_str(), (int)key.length(), 0, 0);
+    std::wstring wKey(wKeyLength, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, key.c_str(), (int)key.length(), &wKey[0], (int)wKey.length());
+
+    // Convert value to wide string
+    size_t wValueLength = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), (int)value.length(), 0, 0);
+    std::wstring wValue(wValueLength, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.c_str(), (int)value.length(), &wValue[0], (int)wValue.length());
+
+    return _wputenv_s(wKey.c_str(), wValue.c_str()) == 0;
+#else
+    return setenv(key.c_str(), value.c_str(), 1) == 0;
 #endif
 }
 
@@ -787,7 +805,7 @@ void MailUtils::configureSessionForAccount(IMAPSession &session, shared_ptr<Acco
     // messages to be incorrectly detected as deleted. Disable QRESYNC before login
     // so the ENABLE QRESYNC command is never sent to the server.
     // See: https://developer.apple.com/forums/thread/694251
-    if (account->IMAPHost().find("imap.mail.me.com") != string::npos) {
+    if (account->isICloud()) {
         session.setQResyncEnabled(false);
     }
 
