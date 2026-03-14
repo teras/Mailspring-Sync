@@ -184,6 +184,7 @@ endif()
 ENDIF() # Android platform
 
 add_subdirectory (src)
-add_subdirectory (tests)
-add_subdirectory (unittest)
+# tests and unittest disabled - they require mailspring_tidy symbols from mailsync
+# add_subdirectory (tests)
+# add_subdirectory (unittest)
 
