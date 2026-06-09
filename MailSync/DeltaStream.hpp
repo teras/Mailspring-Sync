@@ -74,6 +74,7 @@ public:
     void emit(vector<DeltaStreamItem> items, int maxDeliveryDelay);
     
     void sendUpdatedSecrets(Account * account);
+    void sendIdentityRefreshNeeded();
 
     void beginConnectionError(string accountId);
     void endConnectionError(string accountId);

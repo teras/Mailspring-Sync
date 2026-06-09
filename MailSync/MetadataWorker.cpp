@@ -189,6 +189,12 @@ void MetadataWorker::onDelta(const json & delta) {
     if (klass == "metadata") {
         applyMetadataJSON(delta["attributes"]);
         setDeltaCursor(delta["cursor"]);
+    } else if (klass == "backend-event") {
+        if (delta["event"] == "identity-refresh-needed") {
+            SharedDeltaStream()->sendIdentityRefreshNeeded();
+        } else {
+            logger->info("Received event of unexpected type `{}`", klass);
+        }
     } else {
         logger->info("Received delta of unexpected type `{}`", klass);
     }
