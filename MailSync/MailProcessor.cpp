@@ -15,6 +15,9 @@
 #include "File.hpp"
 #include "constants.h"
 
+#include <algorithm>
+#include <cctype>
+
 #if defined(_MSC_VER)
 #include <direct.h>
 #include <codecvt>
@@ -146,13 +149,19 @@ shared_ptr<Message> MailProcessor::insertMessage(IMAPMessage * mMsg, Folder & fo
         
         msg->setThreadId(thread->id());
 
+        // Apply the new message's attributes to the thread (folder/label refcounts,
+        // unread/starred counters, timestamps) BEFORE saving the thread. This avoids
+        // Message::afterSave re-loading and re-saving the thread a second time.
+        auto allLabels = store->allLabelsCache(msg->accountId());
+        MessageSnapshot empty = MessageEmptySnapshot;
+        thread->applyMessageAttributeChanges(empty, msg.get(), allLabels);
+        msg->captureSnapshot();
+        msg->_skipThreadUpdatesAfterSave = true;
+
         // Index the thread metadata for search. We only do this once and it'd
         // be costly to make it part of the save hooks.
         appendToThreadSearchContent(thread.get(), msg.get(), nullptr);
         store->save(thread.get());
-
-        // Save the message - this will automatically find and update the counters
-        // on the thread we just created. Kind of a shame to find it twice but oh well.
         store->save(msg.get());
         
         // Make the thread accessible by all of the message references
@@ -161,14 +170,8 @@ shared_ptr<Message> MailProcessor::insertMessage(IMAPMessage * mMsg, Folder & fo
         transaction.commit();
     }
 
-    {
-        // Index contacts for autocomplete. We do this separately in a transaction that does not
-        // emit any deltas, since the client doesn't need to be bothered with contacts changes.
-        MailStoreTransaction transaction{store, "insertMessage:contacts"};
-        upsertContacts(msg.get());
-        store->unsafeEraseTransactionDeltas();
-        transaction.commit();
-    }
+    upsertContacts(msg.get());
+
     return msg;
 }
 
@@ -279,6 +282,56 @@ void MailProcessor::updateMessage(Message * local, IMAPMessage * remote, Folder 
         transaction.commit();
     }
 }
+
+namespace {
+
+// Lowercase + trim ASCII whitespace. Uses unsigned-char lambdas because
+// the C ctype functions are UB on negative `char` values, and these headers
+// can carry arbitrary bytes from the public Internet.
+std::string lowerTrimmed(const std::string & s) {
+    auto isWs = [](unsigned char c) { return std::isspace(c) != 0; };
+    auto first = std::find_if_not(s.begin(), s.end(), isWs);
+    auto last  = std::find_if_not(s.rbegin(), s.rend(), isWs).base();
+    if (first >= last) return {};
+    std::string out(first, last);
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return out;
+}
+
+// Classify an Importance / X-MSMail-Priority value to one of
+// "high" / "low" / "normal", or empty if unrecognized. Token-based to avoid
+// substring false positives like "abnormal" matching "normal" or
+// "highly recommended" matching "high".
+std::string classifyImportanceText(const std::string & raw) {
+    std::string v = lowerTrimmed(raw);
+    if (v.empty()) return {};
+    // Outlook/MAPI extended values that some gateways pass through verbatim.
+    if (v.compare(0, 12, "above normal") == 0) return "high";
+    if (v.compare(0, 12, "below normal") == 0) return "low";
+    // Otherwise compare the first whitespace/comment-delimited token.
+    auto cut = v.find_first_of(" \t(,;");
+    std::string token = (cut == std::string::npos) ? v : v.substr(0, cut);
+    if (token == "high")   return "high";
+    if (token == "low")    return "low";
+    if (token == "normal") return "normal";
+    return {};
+}
+
+// X-Priority: numeric scale 1-5 per RFC 2076. Other digits and non-digit
+// values are treated as unrecognized so the caller can fall through.
+std::string classifyXPriority(const std::string & raw) {
+    std::string v = lowerTrimmed(raw);
+    if (v.empty() || !std::isdigit(static_cast<unsigned char>(v[0]))) return {};
+    switch (v[0]) {
+        case '1': case '2': return "high";
+        case '3':           return "normal";
+        case '4': case '5': return "low";
+        default:            return {};
+    }
+}
+
+} // namespace
 
 void MailProcessor::retrievedMessageBody(Message * message, MessageParser * parser) {
     CleanHTMLBodyRendererTemplateCallback * htmlCallback = new CleanHTMLBodyRendererTemplateCallback();
@@ -400,8 +453,6 @@ void MailProcessor::retrievedMessageBody(Message * message, MessageParser * pars
         if (msgHeader != nullptr) {
             String * listUnsub = msgHeader->extraHeaderValueForName(MCSTR("List-Unsubscribe"));
             String * listUnsubPost = msgHeader->extraHeaderValueForName(MCSTR("List-Unsubscribe-Post"));
-            String * xPriority = msgHeader->extraHeaderValueForName(MCSTR("X-Priority"));
-            String * importance = msgHeader->extraHeaderValueForName(MCSTR("Importance"));
 
             if (listUnsub != nullptr) {
                 message->_data["hListUnsub"] = listUnsub->UTF8Characters();
@@ -409,11 +460,27 @@ void MailProcessor::retrievedMessageBody(Message * message, MessageParser * pars
             if (listUnsubPost != nullptr) {
                 message->_data["hListUnsubPost"] = listUnsubPost->UTF8Characters();
             }
-            if (xPriority != nullptr) {
-                message->_data["hXPriority"] = xPriority->UTF8Characters();
+
+            // Resolve message importance to a canonical "high" / "low" / "normal".
+            // Precedence: Importance > X-Priority > X-MSMail-Priority. The Importance
+            // header is authoritative when present — if its value is unrecognized we
+            // stop the chain rather than fall through to lower-precedence headers
+            // that might contradict an explicitly-set Importance.
+            string importance;
+            if (String * h = msgHeader->extraHeaderValueForName(MCSTR("Importance"))) {
+                importance = classifyImportanceText(h->UTF8Characters());
+            } else {
+                if (String * h = msgHeader->extraHeaderValueForName(MCSTR("X-Priority"))) {
+                    importance = classifyXPriority(h->UTF8Characters());
+                }
+                if (importance.empty()) {
+                    if (String * h = msgHeader->extraHeaderValueForName(MCSTR("X-MSMail-Priority"))) {
+                        importance = classifyImportanceText(h->UTF8Characters());
+                    }
+                }
             }
-            if (importance != nullptr) {
-                message->_data["hImportance"] = importance->UTF8Characters();
+            if (!importance.empty()) {
+                message->_data["hImportance"] = importance;
             }
         }
 
@@ -459,11 +526,14 @@ void MailProcessor::unlinkMessagesMatchingQuery(Query & query, int phase)
                 // we unlinked this message in a previous cycle and it will be deleted momentarily.
                 continue;
             }
-            
+
             // don't spam the logs when a zillion messages are being deleted
             if (logSubjects) {
                 logger->info("-- Unlinking \"{}\" ({})", msg->subject(), msg->id());
             }
+            // Only remoteUID is changing, which doesn't affect thread counters
+            // (not in MessageSnapshot). Skip the expensive afterSave thread update.
+            msg->_skipThreadUpdatesAfterSave = true;
             msg->setRemoteUID(UINT32_MAX - phase);
             store->save(msg.get());
         }
@@ -619,7 +689,7 @@ void MailProcessor::upsertContacts(Message * message) {
     if (!message->isSentByUser()) {
         return;
     }
-
+    
     map<string, json> byEmail{};
     for (auto & c : message->to()) {
         if (c.count("email")) {
@@ -646,43 +716,48 @@ void MailProcessor::upsertContacts(Message * message) {
     for (auto const& imap: byEmail) {
         emails.push_back(imap.first);
     }
-
+    
     if (emails.size() > 25) {
         // I think it's safe to say mass emails shouldn't create contacts.
         return;
     }
-
-    Query query = Query().equal("email", emails).equal("source", CONTACT_SOURCE_MAIL);
-    auto results = store->findAll<Contact>(query);
     
-    // update refcounts of existing items if this is a sent message
-    for (auto & result : results) {
-        if (result->refs() < CONTACT_MAX_REFS) {
-            result->incrementRefs();
-            store->save(result.get());
+    {
+        // Index contacts for autocomplete. We do this separately in a transaction that does not
+        // emit any deltas, since the client doesn't need to be bothered with contacts changes.
+        MailStoreTransaction transaction{store, "insertMessage:contacts"};
+
+        Query query = Query().equal("email", emails).equal("source", CONTACT_SOURCE_MAIL);
+        auto results = store->findAll<Contact>(query);
+        
+        // update refcounts of existing items if this is a sent message
+        for (auto & result : results) {
+            if (result->refs() < CONTACT_MAX_REFS) {
+                result->incrementRefs();
+                store->save(result.get());
+            }
+            byEmail.erase(result->email());
         }
-        byEmail.erase(result->email());
-    }
-    
-    if (byEmail.size() == 0) {
-        return;
-    }
+        
+        // insert remaining items (contacts not yet in the database)
+        for (auto & result : byEmail) {
+            string name = result.second.count("name") ? result.second["name"].get<string>() : "";
+            string email = result.second.count("email") ? result.second["email"].get<string>() : "";
 
-    // insert remaining items
-    for (auto & result : byEmail) {
-        string name = result.second.count("name") ? result.second["name"].get<string>() : "";
-        string email = result.second.count("email") ? result.second["email"].get<string>() : "";
+            // "Mailspring Team" is used in the welcome email sent from the user's own address.
+            // Skip creating the contact to avoid saving the wrong display name.
+            if (name == "Mailspring Team" && email.find("@getmailspring.com") == string::npos) {
+                continue;
+            }
 
-        // "Mailspring Team" is used in the welcome email sent from the user's own address.
-        // Skip creating the contact to avoid saving the wrong display name.
-        if (name == "Mailspring Team" && email.find("@getmailspring.com") == string::npos) {
-            continue;
+            auto c = make_shared<Contact>(result.first, message->accountId(), result.first, 0, CONTACT_SOURCE_MAIL);
+            c->setName(name);
+            c->incrementRefs();
+            store->save(c.get());
         }
-
-        auto c = make_shared<Contact>(result.first, message->accountId(), result.first, 0, CONTACT_SOURCE_MAIL);
-        c->setName(name);
-        c->incrementRefs();
-        store->save(c.get());
+        
+        store->unsafeEraseTransactionDeltas();
+        transaction.commit();
     }
 }
 

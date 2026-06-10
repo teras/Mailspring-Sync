@@ -1,4 +1,4 @@
-cmake_minimum_required (VERSION 2.6)
+cmake_minimum_required (VERSION 3.22)
 project (mailcore2) 
 
 IF(APPLE)
@@ -25,7 +25,7 @@ IF(APPLE)
   set(mac_libraries iconv)
   
 ELSEIF(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
-  set(CMAKE_CXX_FLAGS "-std=gnu++17")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=gnu++17")
   
   set(additional_includes
     /usr/include/tidy

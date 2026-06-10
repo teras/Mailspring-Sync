@@ -208,6 +208,10 @@ void DeltaStream::sendUpdatedSecrets(Account * account) {
     emit(DeltaStreamItem("persist", "ProcessAccountSecretsUpdated", items), 0);
 }
 
+void DeltaStream::sendIdentityRefreshNeeded() {
+    emit(DeltaStreamItem("persist", "ProcessIdentityRefreshNeeded", {}), 0);
+}
+
 void DeltaStream::beginConnectionError(string accountId) {
     connectionError = true;
     vector<json> items {};
