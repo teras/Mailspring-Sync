@@ -12,6 +12,7 @@
 		43167F0C1EF5F5C100D8E282 /* Thread.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 43167F0A1EF5F5C100D8E282 /* Thread.cpp */; };
 		43167F101EF5F6C700D8E282 /* Folder.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 43167F0E1EF5F6C700D8E282 /* Folder.cpp */; };
 		43256B0621E7EEC900590F1B /* DAVWorker.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 43256B0521E7EEC900590F1B /* DAVWorker.cpp */; };
+		ECDA000000000000000000F2 /* ExternalCardDAVWorker.cpp in Sources */ = {isa = PBXBuildFile; fileRef = ECDA000000000000000000F1 /* ExternalCardDAVWorker.cpp */; };
 		43256B0B21E802DD00590F1B /* DavXML.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 43256B0A21E802DD00590F1B /* DavXML.cpp */; };
 		432573B71F2F7F9700E7CA4B /* MetadataWorker.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 432573B51F2F7F9700E7CA4B /* MetadataWorker.cpp */; };
 		43462D632175C6FC002BCBF5 /* libetpan.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 43462D572175C5C8002BCBF5 /* libetpan.a */; };
@@ -167,6 +168,7 @@
 		43167F0F1EF5F6C700D8E282 /* Folder.hpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.h; path = Folder.hpp; sourceTree = "<group>"; };
 		43256AF821E7EE9E00590F1B /* DAVWorker.hpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.h; path = DAVWorker.hpp; sourceTree = "<group>"; };
 		43256B0521E7EEC900590F1B /* DAVWorker.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = DAVWorker.cpp; sourceTree = "<group>"; };
+		ECDA000000000000000000F1 /* ExternalCardDAVWorker.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = ExternalCardDAVWorker.cpp; sourceTree = "<group>"; };
 		43256B0721E7FFF800590F1B /* libxml2.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libxml2.tbd; path = usr/lib/libxml2.tbd; sourceTree = SDKROOT; };
 		43256B0921E802B400590F1B /* MailSync.xcodeproj */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text; path = MailSync.xcodeproj; sourceTree = "<group>"; };
 		43256B0A21E802DD00590F1B /* DavXML.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = DavXML.cpp; sourceTree = "<group>"; };
@@ -383,6 +385,7 @@
 				43CD2FC323514E050013513A /* VCard.cpp */,
 				43256AF821E7EE9E00590F1B /* DAVWorker.hpp */,
 				43256B0521E7EEC900590F1B /* DAVWorker.cpp */,
+				ECDA000000000000000000F1 /* ExternalCardDAVWorker.cpp */,
 				43C127D4234AB218004DDDC4 /* DAVUtils.hpp */,
 				43C127D3234AB218004DDDC4 /* DAVUtils.cpp */,
 				4385C98B233AA6FD00E5A357 /* GoogleContactsWorker.hpp */,
@@ -706,6 +709,7 @@
 				43B48E851F339B24002D202E /* Identity.cpp in Sources */,
 				4368DCCC1F43857D00F22FFD /* platform.cpp in Sources */,
 				43256B0621E7EEC900590F1B /* DAVWorker.cpp in Sources */,
+				ECDA000000000000000000F2 /* ExternalCardDAVWorker.cpp in Sources */,
 				4368DCC11F43851A00F22FFD /* call_stack_windows.cpp in Sources */,
 				4378B8371F439FAD00C65630 /* GenericException.cpp in Sources */,
 				4364899B1EF335A9007816EC /* DeltaStream.cpp in Sources */,

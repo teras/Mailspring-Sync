@@ -91,6 +91,7 @@
   <ItemGroup>
     <ClCompile Include="..\MailSync\DAVUtils.cpp" />
     <ClCompile Include="..\MailSync\DAVWorker.cpp" />
+    <ClCompile Include="..\MailSync\ExternalCardDAVWorker.cpp" />
     <ClCompile Include="..\MailSync\VCard.cpp" />
     <ClCompile Include="..\MailSync\DeltaStream.cpp" />
     <ClCompile Include="..\MailSync\GenericException.cpp" />
